@@ -8,8 +8,10 @@ struct DrawData {
   PipelineRef pipeline;
   Range vertRange;
   Range uniformRange;
-  uint32_t vertexCount;
+  Range indexRange;
+  uint32_t indexCount;
   gx::GXBindGroups bindGroups;
+  std::optional<float> dstAlpha;
 };
 
 struct PipelineConfig : public gx::PipelineConfig {};

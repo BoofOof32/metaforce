@@ -13,6 +13,8 @@ constexpr u32 MaxKColors = GX::MAX_KCOLOR;
 constexpr u32 MaxTexMtx = 10;
 constexpr u32 MaxPTTexMtx = 20;
 constexpr u32 MaxTexCoord = GX::MAX_TEXCOORD;
+constexpr u32 MaxVtxAttr = GX::VA_MAX_ATTR;
+constexpr u32 MaxTevSwap = GX::MAX_TEVSWAP;
 
 template <typename Arg, Arg Default>
 struct TevPass {
@@ -40,6 +42,8 @@ struct TevStage {
   GX::TexCoordID texCoordId = GX::TEXCOORD_NULL;
   GX::TexMapID texMapId = GX::TEXMAP_NULL;
   GX::ChannelID channelId = GX::COLOR_NULL;
+  GX::TevSwapSel tevSwapRas = GX::TEV_SWAP0;
+  GX::TevSwapSel tevSwapTex = GX::TEV_SWAP0;
   bool operator==(const TevStage&) const = default;
 };
 struct TextureBind {
@@ -63,8 +67,8 @@ struct ColorChannelConfig {
 };
 // For uniform generation
 struct ColorChannelState {
-  zeus::CColor matColor = zeus::skClear;
-  zeus::CColor ambColor = zeus::skClear;
+  zeus::CColor matColor;
+  zeus::CColor ambColor;
   GX::LightMask lightState;
 };
 using LightVariant = std::variant<std::monostate, Light, zeus::CColor>;
@@ -86,6 +90,23 @@ struct FogState {
   float farZ = 0.f;
   zeus::CColor color;
 };
+struct TevSwap {
+  GX::TevColorChan red = GX::CH_RED;
+  GX::TevColorChan green = GX::CH_GREEN;
+  GX::TevColorChan blue = GX::CH_BLUE;
+  GX::TevColorChan alpha = GX::CH_ALPHA;
+  bool operator==(const TevSwap&) const = default;
+  operator bool() const { return *this != TevSwap{}; }
+};
+struct AlphaCompare {
+  GX::Compare comp0 = GX::ALWAYS;
+  float ref0 = 0.f;
+  GX::AlphaOp op = GX::AOP_AND;
+  GX::Compare comp1 = GX::ALWAYS;
+  float ref1 = 0.f;
+  bool operator==(const AlphaCompare& other) const = default;
+  operator bool() const { return *this != AlphaCompare{}; }
+};
 
 struct GXState {
   zeus::CMatrix4f mv;
@@ -100,7 +121,7 @@ struct GXState {
   GX::Compare depthFunc = GX::LEQUAL;
   zeus::CColor clearColor = zeus::skBlack;
   std::optional<float> dstAlpha;
-  std::optional<float> alphaDiscard;
+  AlphaCompare alphaCompare;
   std::array<zeus::CColor, MaxTevRegs> colorRegs;
   std::array<zeus::CColor, GX::MAX_KCOLOR> kcolors;
   std::array<ColorChannelConfig, MaxColorChannels> colorChannelConfig;
@@ -111,6 +132,13 @@ struct GXState {
   std::array<TexMtxVariant, MaxTexMtx> texMtxs;
   std::array<Mat4x4<float>, MaxPTTexMtx> ptTexMtxs;
   std::array<TcgConfig, MaxTexCoord> tcgs;
+  std::array<GX::AttrType, MaxVtxAttr> vtxDesc;
+  std::array<TevSwap, MaxTevSwap> tevSwapTable{
+      TevSwap{},
+      TevSwap{GX::CH_RED, GX::CH_RED, GX::CH_RED, GX::CH_ALPHA},
+      TevSwap{GX::CH_GREEN, GX::CH_GREEN, GX::CH_GREEN, GX::CH_ALPHA},
+      TevSwap{GX::CH_BLUE, GX::CH_BLUE, GX::CH_BLUE, GX::CH_ALPHA},
+  };
   bool depthCompare = true;
   bool depthUpdate = true;
   bool alphaUpdate = true;
@@ -128,12 +156,13 @@ const TextureBind& get_texture(GX::TexMapID id) noexcept;
 
 struct ShaderConfig {
   GX::FogType fogType;
+  std::array<GX::AttrType, MaxVtxAttr> vtxAttrs;
+  std::array<TevSwap, MaxTevSwap> tevSwapTable;
   std::array<std::optional<TevStage>, MaxTevStages> tevStages;
   std::array<ColorChannelConfig, MaxColorChannels> colorChannels;
   std::array<TcgConfig, MaxTexCoord> tcgs;
-  std::optional<float> alphaDiscard;
-  bool denormalizedVertexAttributes = false;
-  bool denormalizedHasNrm = false; // TODO this is a hack
+  AlphaCompare alphaCompare;
+  bool hasIndexedAttributes = false;
   bool operator==(const ShaderConfig&) const = default;
 };
 struct PipelineConfig {
@@ -168,8 +197,6 @@ struct ShaderInfo {
   std::bitset<MaxPTTexMtx> usesPTTexMtx;
   std::array<GX::TexGenType, MaxTexMtx> texMtxTypes;
   u32 uniformSize = 0;
-  bool usesVtxColor : 1 = false;
-  bool usesNormal : 1 = false;
   bool usesFog : 1 = false;
 };
 struct BindGroupRanges {
@@ -247,7 +274,18 @@ inline void xxh3_update(XXH3_state_t& state, const gfx::gx::TcgConfig& input) {
   XXH3_64bits_update(&state, &input.normalize, sizeof(gfx::gx::TcgConfig::normalize));
 }
 template <>
+inline void xxh3_update(XXH3_state_t& state, const gfx::gx::AlphaCompare& input) {
+  XXH3_64bits_update(&state, &input.comp0, sizeof(gfx::gx::AlphaCompare::comp0));
+  XXH3_64bits_update(&state, &input.ref0, sizeof(gfx::gx::AlphaCompare::ref0));
+  XXH3_64bits_update(&state, &input.op, sizeof(gfx::gx::AlphaCompare::op));
+  XXH3_64bits_update(&state, &input.comp1, sizeof(gfx::gx::AlphaCompare::comp1));
+  XXH3_64bits_update(&state, &input.ref1, sizeof(gfx::gx::AlphaCompare::ref1));
+}
+template <>
 inline void xxh3_update(XXH3_state_t& state, const gfx::gx::ShaderConfig& input) {
+  XXH3_64bits_update(&state, &input.fogType, sizeof(gfx::gx::ShaderConfig::fogType));
+  XXH3_64bits_update(&state, &input.vtxAttrs, sizeof(gfx::gx::ShaderConfig::vtxAttrs));
+  XXH3_64bits_update(&state, &input.tevSwapTable, sizeof(gfx::gx::ShaderConfig::tevSwapTable));
   for (const auto& item : input.tevStages) {
     if (!item) {
       break;
@@ -260,12 +298,9 @@ inline void xxh3_update(XXH3_state_t& state, const gfx::gx::ShaderConfig& input)
   for (const auto& item : input.tcgs) {
     xxh3_update(state, item);
   }
-  if (input.alphaDiscard) {
-    XXH3_64bits_update(&state, &*input.alphaDiscard, sizeof(float));
+  if (input.alphaCompare) {
+    xxh3_update(state, input.alphaCompare);
   }
-  XXH3_64bits_update(&state, &input.denormalizedVertexAttributes,
-                     sizeof(gfx::gx::ShaderConfig::denormalizedVertexAttributes));
-  XXH3_64bits_update(&state, &input.denormalizedHasNrm, sizeof(gfx::gx::ShaderConfig::denormalizedHasNrm));
-  XXH3_64bits_update(&state, &input.fogType, sizeof(gfx::gx::ShaderConfig::fogType));
+  XXH3_64bits_update(&state, &input.hasIndexedAttributes, sizeof(gfx::gx::ShaderConfig::hasIndexedAttributes));
 }
 } // namespace aurora

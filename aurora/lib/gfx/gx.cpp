@@ -1,6 +1,7 @@
 #include "gx.hpp"
 
 #include "../gpu.hpp"
+#include "Runtime/Graphics/GX.hpp"
 #include "common.hpp"
 
 #include <absl/container/flat_hash_map.h>
@@ -107,14 +108,7 @@ void GXSetChanCtrl(GX::ChannelID id, bool lightingEnabled, GX::ColorSrc ambSrc, 
   g_gxState.colorChannelState[idx].lightState = lightState;
 }
 void GXSetAlphaCompare(GX::Compare comp0, float ref0, GX::AlphaOp op, GX::Compare comp1, float ref1) noexcept {
-  if (comp0 == GX::ALWAYS && comp1 == GX::ALWAYS) {
-    g_gxState.alphaDiscard.reset();
-  } else if (comp0 == GX::GEQUAL && comp1 == GX::NEVER) {
-    g_gxState.alphaDiscard = ref0;
-  } else {
-    Log.report(logvisor::Fatal, FMT_STRING("GXSetAlphaCompare: unknown operands"));
-    unreachable();
-  }
+  g_gxState.alphaCompare = {comp0, ref0, op, comp1, ref1};
 }
 void GXSetTexCoordGen2(GX::TexCoordID dst, GX::TexGenType type, GX::TexGenSrc src, GX::TexMtx mtx, GXBool normalize,
                        GX::PTTexMtx postMtx) noexcept {
@@ -187,6 +181,28 @@ void GXSetFog(GX::FogType type, float startZ, float endZ, float nearZ, float far
   g_gxState.fog = {type, startZ, endZ, nearZ, farZ, color};
 }
 void GXSetFogColor(const GXColor& color) noexcept { g_gxState.fog.color = color; }
+void GXSetVtxDesc(GX::Attr attr, GX::AttrType type) noexcept { g_gxState.vtxDesc[attr] = type; }
+void GXSetVtxDescv(GX::VtxDescList* list) noexcept {
+  g_gxState.vtxDesc.fill({});
+  while (*list) {
+    g_gxState.vtxDesc[list->attr] = list->type;
+    ++list;
+  }
+}
+void GXClearVtxDesc() noexcept { g_gxState.vtxDesc.fill({}); }
+void GXSetTevSwapModeTable(GX::TevSwapSel id, GX::TevColorChan red, GX::TevColorChan green, GX::TevColorChan blue,
+                           GX::TevColorChan alpha) noexcept {
+  if (id < GX::TEV_SWAP0 || id >= GX::MAX_TEVSWAP) {
+    Log.report(logvisor::Fatal, FMT_STRING("invalid tev swap sel {}"), id);
+    unreachable();
+  }
+  g_gxState.tevSwapTable[id] = {red, green, blue, alpha};
+}
+void GXSetTevSwapMode(GX::TevStageID stageId, GX::TevSwapSel rasSel, GX::TevSwapSel texSel) noexcept {
+  auto& stage = g_gxState.tevStages[stageId];
+  stage.tevSwapRas = rasSel;
+  stage.tevSwapTex = texSel;
+}
 
 namespace aurora::gfx {
 static logvisor::Module Log("aurora::gfx::gx");
@@ -266,21 +282,93 @@ static inline wgpu::CompareFunction to_compare_function(GX::Compare func) {
 }
 
 static inline wgpu::BlendState to_blend_state(GX::BlendMode mode, GX::BlendFactor srcFac, GX::BlendFactor dstFac,
-                                              std::optional<float> dstAlpha) {
-  if (mode != GX::BM_BLEND) {
-    Log.report(logvisor::Fatal, FMT_STRING("How to {}?"), mode);
+                                              GX::LogicOp op, std::optional<float> dstAlpha) {
+  wgpu::BlendComponent colorBlendComponent;
+  switch (mode) {
+  case GX::BM_NONE:
+    colorBlendComponent = {
+        .operation = wgpu::BlendOperation::Add,
+        .srcFactor = wgpu::BlendFactor::Src,
+        .dstFactor = wgpu::BlendFactor::Zero,
+    };
+    break;
+  case GX::BM_BLEND:
+    colorBlendComponent = {
+        .operation = wgpu::BlendOperation::Add,
+        .srcFactor = to_blend_factor(srcFac),
+        .dstFactor = to_blend_factor(dstFac),
+    };
+    break;
+  case GX::BM_SUBTRACT:
+    colorBlendComponent = {
+        .operation = wgpu::BlendOperation::ReverseSubtract,
+        .srcFactor = wgpu::BlendFactor::Src,
+        .dstFactor = wgpu::BlendFactor::Dst,
+    };
+    break;
+  case GX::BM_LOGIC:
+    switch (op) {
+    case GX::LO_CLEAR:
+      colorBlendComponent = {
+          .operation = wgpu::BlendOperation::Add,
+          .srcFactor = wgpu::BlendFactor::Zero,
+          .dstFactor = wgpu::BlendFactor::Zero,
+      };
+      break;
+    case GX::LO_COPY:
+      colorBlendComponent = {
+          .operation = wgpu::BlendOperation::Add,
+          .srcFactor = wgpu::BlendFactor::Src,
+          .dstFactor = wgpu::BlendFactor::Zero,
+      };
+      break;
+    case GX::LO_NOOP:
+      colorBlendComponent = {
+          .operation = wgpu::BlendOperation::Add,
+          .srcFactor = wgpu::BlendFactor::Zero,
+          .dstFactor = wgpu::BlendFactor::Dst,
+      };
+      break;
+    case GX::LO_INV:
+      colorBlendComponent = {
+          .operation = wgpu::BlendOperation::Add,
+          .srcFactor = wgpu::BlendFactor::Zero,
+          .dstFactor = wgpu::BlendFactor::OneMinusDst,
+      };
+      break;
+    case GX::LO_INVCOPY:
+      colorBlendComponent = {
+          .operation = wgpu::BlendOperation::Add,
+          .srcFactor = wgpu::BlendFactor::OneMinusSrc,
+          .dstFactor = wgpu::BlendFactor::Zero,
+      };
+      break;
+    case GX::LO_SET:
+      colorBlendComponent = {
+          .operation = wgpu::BlendOperation::Add,
+          .srcFactor = wgpu::BlendFactor::One,
+          .dstFactor = wgpu::BlendFactor::Zero,
+      };
+      break;
+    default:
+      Log.report(logvisor::Fatal, FMT_STRING("unsupported logic op {}"), op);
+      unreachable();
+    }
+    break;
+  default:
+    Log.report(logvisor::Fatal, FMT_STRING("unsupported blend mode {}"), mode);
+    unreachable();
   }
-  const auto colorBlendComponent = wgpu::BlendComponent{
+  wgpu::BlendComponent alphaBlendComponent{
       .operation = wgpu::BlendOperation::Add,
-      .srcFactor = to_blend_factor(srcFac),
-      .dstFactor = to_blend_factor(dstFac),
+      .srcFactor = wgpu::BlendFactor::SrcAlpha,
+      .dstFactor = wgpu::BlendFactor::Zero,
   };
-  auto alphaBlendComponent = colorBlendComponent;
   if (dstAlpha) {
     alphaBlendComponent = wgpu::BlendComponent{
         .operation = wgpu::BlendOperation::Add,
-        .srcFactor = wgpu::BlendFactor::Zero,
-        .dstFactor = wgpu::BlendFactor::Constant,
+        .srcFactor = wgpu::BlendFactor::Constant,
+        .dstFactor = wgpu::BlendFactor::Zero,
     };
   }
   return {
@@ -340,7 +428,8 @@ wgpu::RenderPipeline build_pipeline(const PipelineConfig& config, const ShaderIn
       .depthWriteEnabled = config.depthUpdate,
       .depthCompare = to_compare_function(config.depthFunc),
   };
-  const auto blendState = to_blend_state(config.blendMode, config.blendFacSrc, config.blendFacDst, config.dstAlpha);
+  const auto blendState =
+      to_blend_state(config.blendMode, config.blendFacSrc, config.blendFacDst, config.blendOp, config.dstAlpha);
   const std::array colorTargets{wgpu::ColorTargetState{
       .format = g_graphicsConfig.colorFormat,
       .blend = &blendState,
@@ -387,6 +476,9 @@ wgpu::RenderPipeline build_pipeline(const PipelineConfig& config, const ShaderIn
 
 ShaderInfo populate_pipeline_config(PipelineConfig& config, GX::Primitive primitive,
                                     const BindGroupRanges& ranges) noexcept {
+  config.shaderConfig.fogType = g_gxState.fog.type;
+  config.shaderConfig.vtxAttrs = g_gxState.vtxDesc;
+  config.shaderConfig.tevSwapTable = g_gxState.tevSwapTable;
   for (u8 i = 0; i < g_gxState.numTevStages; ++i) {
     config.shaderConfig.tevStages[i] = g_gxState.tevStages[i];
   }
@@ -396,8 +488,11 @@ ShaderInfo populate_pipeline_config(PipelineConfig& config, GX::Primitive primit
   for (u8 i = 0; i < g_gxState.numTexGens; ++i) {
     config.shaderConfig.tcgs[i] = g_gxState.tcgs[i];
   }
-  config.shaderConfig.alphaDiscard = g_gxState.alphaDiscard;
-  config.shaderConfig.fogType = g_gxState.fog.type;
+  config.shaderConfig.alphaCompare = g_gxState.alphaCompare;
+  if (std::any_of(config.shaderConfig.vtxAttrs.begin(), config.shaderConfig.vtxAttrs.end(),
+                  [](const auto type) { return type == GX::INDEX8 || type == GX::INDEX16; })) {
+    config.shaderConfig.hasIndexedAttributes = true;
+  }
   config = {
       .shaderConfig = config.shaderConfig,
       .primitive = primitive,
@@ -601,7 +696,7 @@ GXBindGroups build_bind_groups(const ShaderInfo& info, const ShaderConfig& confi
       .uniformBindGroup = bind_group_ref(wgpu::BindGroupDescriptor{
           .label = "GX Uniform Bind Group",
           .layout = layouts.uniformLayout,
-          .entryCount = static_cast<uint32_t>(config.denormalizedVertexAttributes ? 1 : uniformEntries.size()),
+          .entryCount = static_cast<uint32_t>(config.hasIndexedAttributes ? uniformEntries.size() : 1),
           .entries = uniformEntries.data(),
       }),
       .samplerBindGroup = bind_group_ref(wgpu::BindGroupDescriptor{
@@ -621,7 +716,7 @@ GXBindGroups build_bind_groups(const ShaderInfo& info, const ShaderConfig& confi
 
 GXBindGroupLayouts build_bind_group_layouts(const ShaderInfo& info, const ShaderConfig& config) noexcept {
   GXBindGroupLayouts out;
-  u32 uniformSizeKey = info.uniformSize + (config.denormalizedVertexAttributes ? 0 : 1);
+  u32 uniformSizeKey = info.uniformSize + (config.hasIndexedAttributes ? 1 : 0);
   const auto uniformIt = sUniformBindGroupLayouts.find(uniformSizeKey);
   if (uniformIt != sUniformBindGroupLayouts.end()) {
     out.uniformLayout = uniformIt->second;
@@ -676,7 +771,7 @@ GXBindGroupLayouts build_bind_group_layouts(const ShaderInfo& info, const Shader
     };
     const auto uniformLayoutDescriptor = wgpu::BindGroupLayoutDescriptor{
         .label = "GX Uniform Bind Group Layout",
-        .entryCount = static_cast<uint32_t>(config.denormalizedVertexAttributes ? 1 : uniformLayoutEntries.size()),
+        .entryCount = static_cast<uint32_t>(config.hasIndexedAttributes ? uniformLayoutEntries.size() : 1),
         .entries = uniformLayoutEntries.data(),
     };
     out.uniformLayout = g_device.CreateBindGroupLayout(&uniformLayoutDescriptor);

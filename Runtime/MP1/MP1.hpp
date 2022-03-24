@@ -139,20 +139,30 @@ public:
   ~CGameArchitectureSupport();
 
   void mouseDown(const SWindowCoord& coord, EMouseButton button, EModifierKey mods) {
-    x30_inputGenerator.mouseDown(coord, button, mods);
+    // x30_inputGenerator.mouseDown(coord, button, mods);
   }
   void mouseUp(const SWindowCoord& coord, EMouseButton button, EModifierKey mods) {
-    x30_inputGenerator.mouseUp(coord, button, mods);
+    // x30_inputGenerator.mouseUp(coord, button, mods);
   }
-  void mouseMove(const SWindowCoord& coord) { x30_inputGenerator.mouseMove(coord); }
-  void scroll(const SWindowCoord& coord, const SScrollDelta& scroll) { x30_inputGenerator.scroll(coord, scroll); }
+  void mouseMove(const SWindowCoord& coord) {
+    // x30_inputGenerator.mouseMove(coord);
+  }
+  void scroll(const SWindowCoord& coord, const SScrollDelta& scroll) {
+    // x30_inputGenerator.scroll(coord, scroll);
+  }
   void charKeyDown(uint8_t charCode, aurora::ModifierKey mods, bool isRepeat);
-  void charKeyUp(uint8_t charCode, aurora::ModifierKey mods) { x30_inputGenerator.charKeyUp(charCode, mods); }
+  void charKeyUp(uint8_t charCode, aurora::ModifierKey mods) {
+    // x30_inputGenerator.charKeyUp(charCode, mods);
+  }
   void specialKeyDown(aurora::SpecialKey key, aurora::ModifierKey mods, bool isRepeat);
 
   void specialKeyUp(aurora::SpecialKey key, aurora::ModifierKey mods);
-  void modKeyDown(aurora::ModifierKey mod, bool isRepeat) { x30_inputGenerator.modKeyDown(mod, isRepeat); }
-  void modKeyUp(aurora::ModifierKey mod) { x30_inputGenerator.modKeyUp(mod); }
+  void modKeyDown(aurora::ModifierKey mod, bool isRepeat) {
+    // x30_inputGenerator.modKeyDown(mod, isRepeat);
+  }
+  void modKeyUp(aurora::ModifierKey mod) {
+    // x30_inputGenerator.modKeyUp(mod);
+  }
 
   void PreloadAudio();
   bool LoadAudio();
@@ -246,7 +256,7 @@ public:
   bool Proc(float dt) override;
   void Draw() override;
   void Shutdown() override;
-//  boo::IWindow* GetMainWindow() const override;
+  //  boo::IWindow* GetMainWindow() const override;
 
   void MemoryCardInitializePump();
 

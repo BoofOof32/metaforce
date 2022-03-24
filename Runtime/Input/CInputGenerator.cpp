@@ -1,120 +1,52 @@
 #include "Runtime/Input/CInputGenerator.hpp"
 
-#include "Runtime/CArchitectureMessage.hpp"
+#include "Runtime/Input/IController.hpp"
+#include "Runtime/Input/CFinalInput.hpp"
+
 #include "Runtime/CArchitectureQueue.hpp"
 
-#include <magic_enum.hpp>
-
 namespace metaforce {
+CInputGenerator::CInputGenerator(/*COsContext& context, */ float leftDiv, float rightDiv)
+/*:  x0_context(context) */ {
+  x4_controller.reset(IController::Create());
+  xc_leftDiv = leftDiv;
+  x10_rightDiv = rightDiv;
+}
 
 void CInputGenerator::Update(float dt, CArchitectureQueue& queue) {
-  if (m_firstFrame) {
-    m_firstFrame = false;
+#if 0
+  if (!x0_context.Update()) {
     return;
   }
+#endif
 
-  const CFinalInput& kbInput = getFinalInput(0, dt);
-  queue.Push(MakeMsg::CreateUserInput(EArchMsgTarget::Game, kbInput));
+  u32 availSlot = 0;
+  bool firstController = false;
+  if (x4_controller) {
+    x4_controller->Poll();
+    for (u32 i = 0; i < x4_controller->GetDeviceCount(); ++i) {
+      auto cont = x4_controller->GetGamepadData(i);
+      if (cont.DeviceIsPresent()) {
+        if (i == 0) {
+          firstController = true;
+        }
+        m_lastInput = CFinalInput(i, dt, cont, xc_leftDiv, x10_rightDiv);
+        queue.Push(MakeMsg::CreateUserInput(EArchMsgTarget::Game, m_lastInput));
+        ++availSlot;
+      }
 
-  /* Dolphin controllers next */
-  //  for (int i = 0; i < 4; ++i) {
-  //    bool connected;
-  //    EStatusChange change = m_dolphinCb.getStatusChange(i, connected);
-  //    if (change != EStatusChange::NoChange)
-  //      queue.Push(MakeMsg::CreateControllerStatus(EArchMsgTarget::Game, i, connected));
-  //    if (connected) {
-  //      CFinalInput input = m_dolphinCb.getFinalInput(i, dt, m_leftDiv, m_rightDiv);
-  //      if (i == 0) /* Merge KB input with first controller */
-  //      {
-  //        input |= kbInput;
-  //        kbUsed = true;
-  //      }
-  //      m_lastUpdate = input;
-  //      queue.Push(MakeMsg::CreateUserInput(EArchMsgTarget::Game, input));
-  //    }
-  //  }
-
-  //  /* Send straight keyboard input if no first controller present */
-  //  if (!kbUsed) {
-  //    m_lastUpdate = kbInput;
-  //  }
-}
-
-void CInputGenerator::controllerAdded(uint32_t which) noexcept {
-  s32 player = aurora::get_controller_player_index(which);
-  if (player < 0) {
-    player = 0;
-    aurora::set_controller_player_index(which, 0);
-  }
-
-  m_state[player] =
-      SAuroraControllerState(which, aurora::is_controller_gamecube(which), aurora::controller_has_rumble(which));
-}
-
-void CInputGenerator::controllerRemoved(uint32_t which) noexcept {
-  auto it = std::find_if(m_state.begin(), m_state.end(), [&which](const auto& s) { return s.m_which == which; });
-  if (it == m_state.end()) {
-    return;
-  }
-
-  (*it) = SAuroraControllerState();
-}
-
-void CInputGenerator::controllerButton(uint32_t which, aurora::ControllerButton button, bool pressed) noexcept {
-  s32 player = aurora::get_controller_player_index(which);
-  if (player < 0) {
-    return;
-  }
-  m_state[player].m_btns.set(size_t(button), pressed);
-}
-
-void CInputGenerator::controllerAxis(uint32_t which, aurora::ControllerAxis axis, int16_t value) noexcept {
-  s32 player = aurora::get_controller_player_index(which);
-  if (player < 0) {
-    return;
-  }
-
-  switch (axis) {
-  case aurora::ControllerAxis::LeftY:
-  case aurora::ControllerAxis::RightY:
-    /* Value is inverted compared to what we expect on the Y axis */
-    value = int16_t(-(value + 1));
-    [[fallthrough]];
-  case aurora::ControllerAxis::LeftX:
-  case aurora::ControllerAxis::RightX:
-    value /= int16_t(256);
-    break;
-  case aurora::ControllerAxis::TriggerLeft:
-  case aurora::ControllerAxis::TriggerRight:
-    value /= int16_t(128);
-    break;
-  default:
-    break;
-  }
-
-  m_state[player].m_axes[size_t(axis)] = value;
-}
-
-void CInputGenerator::SetMotorState(EIOPort port, EMotorState state) {
-  if (m_state[size_t(port)].m_hasRumble && m_state[size_t(port)].m_isGamecube) {
-    if (state == EMotorState::Rumble) {
-      aurora::controller_rumble(m_state[size_t(port)].m_which, 1, 1);
-    } else if (state == EMotorState::Stop) {
-      aurora::controller_rumble(m_state[size_t(port)].m_which, 0, 1);
-    } else if (state == EMotorState::StopHard) {
-      aurora::controller_rumble(m_state[size_t(port)].m_which, 0, 0);
+      if (x8_connectedControllers[i] != cont.DeviceIsPresent()) {
+        queue.Push(MakeMsg::CreateControllerStatus(EArchMsgTarget::Game, i, cont.DeviceIsPresent()));
+        x8_connectedControllers[i] = cont.DeviceIsPresent();
+      }
     }
-  } // TODO: Figure out good intensity values for generic controllers with rumble, support HAPTIC?
+  }
+#if 0
+  if (firstController) {
+    queue.Push(MakeMsg::CreateUserInput(EArchMsgTarget::Game, CFinalInput(availSlot, dt, x0_osContext)));
+  } else {
+    queue.Push(MakeMsg::CreateUserInput(EArchMsgTarget::Game, CFinalInput(0, dt, x0_osContext)));
+  }
+#endif
 }
-
-const CFinalInput& CInputGenerator::getFinalInput(unsigned int idx, float dt) {
-  auto input = CFinalInput(idx, dt, m_data, m_lastUpdate);
-  // Merge controller input with kb/m input
-  auto state = m_state[idx];
-  state.clamp();
-  input |= CFinalInput(idx, dt, state, m_lastUpdate, m_leftDiv, m_rightDiv);
-  m_lastUpdate = input;
-  return m_lastUpdate;
-}
-
-} // namespace metaforce
+} // namespace metaforce::WIP

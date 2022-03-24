@@ -191,6 +191,7 @@ inline void xxh3_update(XXH3_state_t& state, const wgpu::SamplerDescriptor& inpu
 namespace aurora::gfx {
 using NewPipelineCallback = std::function<wgpu::RenderPipeline()>;
 std::mutex g_pipelineMutex;
+static bool g_hasPipelineThread = false;
 static std::thread g_pipelineThread;
 static std::atomic_bool g_pipelineThreadEnd;
 static std::condition_variable g_pipelineCv;
@@ -211,7 +212,7 @@ wgpu::Buffer g_uniformBuffer;
 wgpu::Buffer g_indexBuffer;
 wgpu::Buffer g_storageBuffer;
 size_t g_staticStorageLastSize = 0;
-static wgpu::Buffer g_stagingBuffer;
+static std::array<wgpu::Buffer, 3> g_stagingBuffers;
 
 static ShaderState g_state;
 static PipelineRef g_currentPipeline;
@@ -225,9 +226,14 @@ static PipelineRef find_pipeline(PipelineCreateCommand command, NewPipelineCallb
     std::scoped_lock guard{g_pipelineMutex};
     found = g_pipelines.contains(hash);
     if (!found) {
-      const auto ref =
-          std::find_if(g_queuedPipelines.begin(), g_queuedPipelines.end(), [=](auto v) { return v.first == hash; });
-      if (ref != g_queuedPipelines.end()) {
+      if (g_hasPipelineThread) {
+        const auto ref =
+            std::find_if(g_queuedPipelines.begin(), g_queuedPipelines.end(), [=](auto v) { return v.first == hash; });
+        if (ref != g_queuedPipelines.end()) {
+          found = true;
+        }
+      } else {
+        g_pipelines.try_emplace(hash, cb());
         found = true;
       }
     }
@@ -387,7 +393,11 @@ static void pipeline_worker() {
 }
 
 void initialize() {
-  g_pipelineThread = std::thread(pipeline_worker);
+  // No async pipelines for OpenGL (ES)
+  if (gpu::g_backendType != wgpu::BackendType::OpenGL && gpu::g_backendType != wgpu::BackendType::OpenGLES) {
+    g_pipelineThread = std::thread(pipeline_worker);
+    g_hasPipelineThread = true;
+  }
 
   const auto createBuffer = [](wgpu::Buffer& out, wgpu::BufferUsage usage, uint64_t size, const char* label) {
     const wgpu::BufferDescriptor descriptor{
@@ -405,8 +415,11 @@ void initialize() {
                "Shared Index Buffer");
   createBuffer(g_storageBuffer, wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst, StorageBufferSize,
                "Shared Storage Buffer");
-  createBuffer(g_stagingBuffer, wgpu::BufferUsage::MapWrite | wgpu::BufferUsage::CopySrc, StagingBufferSize,
-               "Staging Buffer");
+  for (int i = 0; i < g_stagingBuffers.size(); ++i) {
+    createBuffer(g_stagingBuffers[i], wgpu::BufferUsage::MapWrite | wgpu::BufferUsage::CopySrc, StagingBufferSize,
+                 "Staging Buffer");
+  }
+  map_staging_buffer();
 
   g_state.moviePlayer = movie_player::construct_state();
   g_state.coloredQuad = colored_quad::construct_state();
@@ -416,9 +429,11 @@ void initialize() {
 }
 
 void shutdown() {
-  g_pipelineThreadEnd = true;
-  g_pipelineCv.notify_all();
-  g_pipelineThread.join();
+  if (g_hasPipelineThread) {
+    g_pipelineThreadEnd = true;
+    g_pipelineCv.notify_all();
+    g_pipelineThread.join();
+  }
 
   gx::shutdown();
 
@@ -429,31 +444,39 @@ void shutdown() {
   g_uniformBuffer = {};
   g_indexBuffer = {};
   g_storageBuffer = {};
-  g_stagingBuffer = {};
+  g_stagingBuffers.fill({});
 
   g_state = {};
 }
 
-void begin_frame() {
-  bool bufferMapped = false;
-  size_t bufferOffset = 0;
-  const auto mapBuffer = [&](ByteBuffer& buf, uint64_t size) {
-    buf = ByteBuffer{static_cast<u8*>(g_stagingBuffer.GetMappedRange(bufferOffset, size)), size};
-    bufferOffset += size;
-  };
-  g_stagingBuffer.MapAsync(
+static size_t currentStagingBuffer = 0;
+static bool bufferMapped = false;
+void map_staging_buffer() {
+  bufferMapped = false;
+  g_stagingBuffers[currentStagingBuffer].MapAsync(
       wgpu::MapMode::Write, 0, StagingBufferSize,
       [](WGPUBufferMapAsyncStatus status, void* userdata) {
-        if (status != WGPUBufferMapAsyncStatus_Success) {
+        if (status == WGPUBufferMapAsyncStatus_DestroyedBeforeCallback) {
+          return;
+        } else if (status != WGPUBufferMapAsyncStatus_Success) {
           Log.report(logvisor::Fatal, FMT_STRING("Buffer mapping failed: {}"), status);
           unreachable();
         }
         *static_cast<bool*>(userdata) = true;
       },
       &bufferMapped);
+}
+
+void begin_frame() {
   while (!bufferMapped) {
     g_device.Tick();
   }
+  size_t bufferOffset = 0;
+  auto& stagingBuf = g_stagingBuffers[currentStagingBuffer];
+  const auto mapBuffer = [&](ByteBuffer& buf, uint64_t size) {
+    buf = ByteBuffer{static_cast<u8*>(stagingBuf.GetMappedRange(bufferOffset, size)), size};
+    bufferOffset += size;
+  };
   mapBuffer(g_verts, VertexBufferSize);
   mapBuffer(g_uniforms, UniformBufferSize);
   mapBuffer(g_indices, IndexBufferSize);
@@ -465,16 +488,18 @@ void end_frame(const wgpu::CommandEncoder& cmd) {
   const auto writeBuffer = [&](ByteBuffer& buf, wgpu::Buffer& out, uint64_t size, std::string_view label) {
     const auto writeSize = buf.size(); // Only need to copy this many bytes
     if (writeSize > 0) {
-      cmd.CopyBufferToBuffer(g_stagingBuffer, bufferOffset, out, 0, writeSize);
+      cmd.CopyBufferToBuffer(g_stagingBuffers[currentStagingBuffer], bufferOffset, out, 0, writeSize);
       buf.clear();
     }
     bufferOffset += size;
   };
-  g_stagingBuffer.Unmap();
+  g_stagingBuffers[currentStagingBuffer].Unmap();
   writeBuffer(g_verts, g_vertexBuffer, VertexBufferSize, "Vertex");
   writeBuffer(g_uniforms, g_uniformBuffer, UniformBufferSize, "Uniform");
   writeBuffer(g_indices, g_indexBuffer, IndexBufferSize, "Index");
   writeBuffer(g_storage, g_storageBuffer, StorageBufferSize, "Storage");
+  currentStagingBuffer = (currentStagingBuffer + 1) % g_stagingBuffers.size();
+  map_staging_buffer();
 }
 
 void render(const wgpu::RenderPassEncoder& pass) {
