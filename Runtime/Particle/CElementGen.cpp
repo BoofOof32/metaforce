@@ -868,6 +868,8 @@ void CElementGen::Render() {
 }
 
 void CElementGen::RenderModels() {
+  SCOPED_GRAPHICS_DEBUG_GROUP(fmt::format(FMT_STRING("CElementGen::RenderModels")), zeus::skYellow);
+
   CParticleGlobals::instance()->m_particleAccessParameters = nullptr;
   if (x26d_26_modelsUseLights) {
     CGraphics::SetLightState(x274_backupLightActive);
@@ -1091,6 +1093,8 @@ void CElementGen::RenderModels() {
 }
 
 void CElementGen::RenderLines() {
+  SCOPED_GRAPHICS_DEBUG_GROUP(fmt::format(FMT_STRING("CElementGen::RenderLines")), zeus::skYellow);
+
   CGenDescription* desc = x1c_genDesc.GetObj();
   CGlobalRandom gr(x27c_randState);
 
@@ -1198,6 +1202,8 @@ void CElementGen::RenderParticles() {
     return;
   }
 
+  SCOPED_GRAPHICS_DEBUG_GROUP(fmt::format(FMT_STRING("CElementGen::RenderParticles")), zeus::skYellow);
+
   CRealElement* size = desc->x4c_x38_SIZE.get();
   if (size && size->IsConstant()) {
     float sizeVal;
@@ -1209,7 +1215,7 @@ void CElementGen::RenderParticles() {
     }
   }
 
-  bool hasModuColor = x338_moduColor != zeus::skBlack; // TODO skClear?
+  bool hasModuColor = x338_moduColor != zeus::skWhite;
   CGraphics::SetCullMode(ERglCullMode::None);
   zeus::CTransform systemModelMatrix(CGraphics::g_ViewMatrix);
   systemModelMatrix.origin.zeroOut();
@@ -1630,6 +1636,8 @@ void CElementGen::RenderParticles() {
 }
 
 void CElementGen::RenderParticlesIndirectTexture() {
+  SCOPED_GRAPHICS_DEBUG_GROUP(fmt::format(FMT_STRING("CElementGen::RenderParticlesIndirectTexture")), zeus::skYellow);
+
   CGenDescription* desc = x1c_genDesc.GetObj();
 
   zeus::CTransform systemViewPointMatrix(CGraphics::g_ViewMatrix);

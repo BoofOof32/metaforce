@@ -396,41 +396,29 @@ static inline std::string vtx_attr(const ShaderConfig& config, GX::Attr attr) {
     unreachable();
   }
   if (attr == GX::VA_POS) {
-    if (type == GX::DIRECT) {
-      return "in_pos";
-    }
-    return "v_verts.data[in_pos_nrm_idx[0]].xyz";
+    return "in_pos";
   }
   if (attr == GX::VA_NRM) {
-    if (type == GX::DIRECT) {
-      return "in_nrm";
-    }
-    return "v_norms.data[in_pos_nrm_idx[1]].xyz";
+    return "in_nrm";
   }
   if (attr == GX::VA_CLR0 || attr == GX::VA_CLR1) {
     const auto idx = attr - GX::VA_CLR0;
-    if (type == GX::DIRECT) {
-      return fmt::format(FMT_STRING("in_clr{}"), idx);
-    }
-    Log.report(logvisor::Fatal, FMT_STRING("indexed color unsupported"));
-    unreachable();
+    return fmt::format(FMT_STRING("in_clr{}"), idx);
   }
   if (attr >= GX::VA_TEX0 && attr <= GX::VA_TEX7) {
     const auto idx = attr - GX::VA_TEX0;
-    if (type == GX::DIRECT) {
-      return fmt::format(FMT_STRING("in_tex{}_uv"), idx);
-    }
-    if (idx == 0) {
-      return "v_packed_uvs.data[in_uv_0_4_idx[0]]";
-    }
-    if (idx < 4) {
-      return fmt::format(FMT_STRING("v_uvs.data[in_uv_0_4_idx[{}]]"), idx);
-    }
-    return fmt::format(FMT_STRING("v_uvs.data[in_uv_5_7_idx[{}]]"), idx - 4);
+    return fmt::format(FMT_STRING("in_tex{}_uv"), idx);
   }
   Log.report(logvisor::Fatal, FMT_STRING("unhandled attr {}"), attr);
   unreachable();
 }
+
+constexpr std::array<std::string_view, MaxVtxAttr> VtxAttributeNames{
+    "pn_mtx",        "tex0_mtx",      "tex1_mtx",      "tex2_mtx",    "tex3_mtx", "tex4_mtx", "tex5_mtx",
+    "tex6_mtx",      "tex7_mtx",      "pos",           "nrm",         "clr0",     "clr1",     "tex0_uv",
+    "tex1_uv",       "tex2_uv",       "tex3_uv",       "tex4_uv",     "tex5_uv",  "tex6_uv",  "tex7_uv",
+    "pos_mtx_array", "nrm_mtx_array", "tex_mtx_array", "light_array", "nbt",
+};
 
 std::pair<wgpu::ShaderModule, ShaderInfo> build_shader(const ShaderConfig& config) noexcept {
   const auto hash = xxh3_hash(config);
@@ -496,7 +484,7 @@ std::pair<wgpu::ShaderModule, ShaderInfo> build_shader(const ShaderConfig& confi
     Log.report(logvisor::Info, FMT_STRING("  alphaCompare: comp0 {} ref0 {} op {} comp1 {} ref1 {}"),
                config.alphaCompare.comp0, config.alphaCompare.ref0, config.alphaCompare.op, config.alphaCompare.comp1,
                config.alphaCompare.ref1);
-    Log.report(logvisor::Info, FMT_STRING("  hasIndexedAttributes: {}"), config.hasIndexedAttributes);
+    Log.report(logvisor::Info, FMT_STRING("  indexedAttributeCount: {}"), config.indexedAttributeCount);
     Log.report(logvisor::Info, FMT_STRING("  fogType: {}"), config.fogType);
   }
 
@@ -510,30 +498,68 @@ std::pair<wgpu::ShaderModule, ShaderInfo> build_shader(const ShaderConfig& confi
   std::string vtxXfrAttrsPre;
   std::string vtxXfrAttrs;
   size_t locIdx = 0;
-  size_t vtxOutIdx = 0;
-  if (config.hasIndexedAttributes) {
+  size_t vtxOutIdx = 1;
+  size_t uniBindingIdx = 1;
+  if (config.indexedAttributeCount > 0) {
     // Display list attributes
-    vtxInAttrs +=
-        "\n    @location(0) in_pos_nrm_idx: vec2<i32>"
-        "\n    , @location(1) in_uv_0_4_idx: vec4<i32>"
-        "\n    , @location(2) in_uv_5_7_idx: vec4<i32>";
-    locIdx += 3;
-    uniformBindings += R"""(
-struct Vec3Block {
-    data: array<vec4<f32>>;
-};
-struct Vec2Block {
-    data: array<vec2<f32>>;
-};
-@group(0) @binding(1)
-var<storage, read> v_verts: Vec3Block;
-@group(0) @binding(2)
-var<storage, read> v_norms: Vec3Block;
-@group(0) @binding(3)
-var<storage, read> v_uvs: Vec2Block;
-@group(0) @binding(4)
-var<storage, read> v_packed_uvs: Vec2Block;
-)""";
+    int currAttrIdx = 0;
+    bool addedTex1Uv = false;
+    for (GX::Attr attr{}; attr < MaxVtxAttr; attr = GX::Attr(attr + 1)) {
+      // Indexed attributes
+      if (config.vtxAttrs[attr] != GX::INDEX8 && config.vtxAttrs[attr] != GX::INDEX16) {
+        continue;
+      }
+      const auto [div, rem] = std::div(currAttrIdx, 4);
+      std::string_view attrName;
+      bool addUniformBinding = true;
+      // TODO: this is a hack to only have to bind tex0_uv and tex1_uv for MP
+      // should figure out a more generic approach
+      if (attr >= GX::VA_TEX1 && attr <= GX::VA_TEX7) {
+        attrName = VtxAttributeNames[GX::VA_TEX1];
+        addUniformBinding = !addedTex1Uv;
+        addedTex1Uv = true;
+      } else {
+        attrName = VtxAttributeNames[attr];
+      }
+      vtxXfrAttrsPre +=
+          fmt::format(FMT_STRING("\n    var {} = v_arr_{}[in_dl{}[{}]];"), vtx_attr(config, attr), attrName, div, rem);
+      if (addUniformBinding) {
+        std::string_view arrType;
+        if (attr == GX::VA_POS || attr == GX::VA_NRM) {
+          arrType = "vec3<f32>";
+        } else if (attr >= GX::VA_TEX0 && attr <= GX::VA_TEX7) {
+          arrType = "vec2<f32>";
+        }
+        uniformBindings += fmt::format(
+            "\n@group(0) @binding({})"
+            "\nvar<storage, read> v_arr_{}: array<{}>;",
+            uniBindingIdx++, attrName, arrType);
+      }
+      ++currAttrIdx;
+    }
+    auto [num4xAttrArrays, rem] = std::div(currAttrIdx, 4);
+    u32 num2xAttrArrays = 0;
+    if (rem > 2) {
+      ++num4xAttrArrays;
+    } else if (rem > 0) {
+      num2xAttrArrays = 1;
+    }
+    for (u32 i = 0; i < num4xAttrArrays; ++i) {
+      if (locIdx > 0) {
+        vtxInAttrs += "\n    , ";
+      } else {
+        vtxInAttrs += "\n    ";
+      }
+      vtxInAttrs += fmt::format(FMT_STRING("@location({}) in_dl{}: vec4<i32>"), locIdx++, i);
+    }
+    for (u32 i = 0; i < num2xAttrArrays; ++i) {
+      if (locIdx > 0) {
+        vtxInAttrs += "\n    , ";
+      } else {
+        vtxInAttrs += "\n    ";
+      }
+      vtxInAttrs += fmt::format(FMT_STRING("@location({}) in_dl{}: vec2<i32>"), locIdx++, num4xAttrArrays + i);
+    }
   }
   for (GX::Attr attr{}; attr < MaxVtxAttr; attr = GX::Attr(attr + 1)) {
     // Direct attributes
@@ -555,11 +581,10 @@ var<storage, read> v_packed_uvs: Vec2Block;
       vtxInAttrs += fmt::format(FMT_STRING("@location({}) in_tex{}_uv: vec2<f32>"), locIdx++, attr - GX::VA_TEX0);
     }
   }
-  vtxXfrAttrsPre += fmt::format(FMT_STRING("\n    var obj_pos = vec4<f32>({}, 1.0);"
-                                           "\n    var obj_norm = vec4<f32>({}, 0.0);"
-                                           "\n    var mv_pos = ubuf.mv * obj_pos;"
-                                           "\n    var mv_norm = ubuf.mv_inv * obj_norm;"
-                                           "\n    out.pos = ubuf.proj * mv_pos;"),
+  vtxXfrAttrsPre += fmt::format(FMT_STRING("\n    var mv_pos = ubuf.pos_mtx * vec4<f32>({}, 1.0);"
+                                           "\n    var mv_nrm = ubuf.nrm_mtx * vec4<f32>({}, 0.0);"
+                                           "\n    out.pos = ubuf.proj * vec4<f32>(mv_pos, 1.0);"
+                                           "\n    out.norm = vec4<f32>(mv_nrm, 0.0);"),
                                 vtx_attr(config, GX::VA_POS), vtx_attr(config, GX::VA_NRM));
 
   std::string fragmentFnPre;
@@ -688,7 +713,7 @@ var<storage, read> v_packed_uvs: Vec2Block;
           var ang_att = light.ang_att.z * ang_dot * ang_dot +
                         light.ang_att.y * ang_dot +
                         light.ang_att.x;
-          var this_color = light.color.xyz * ang_att * att * max(dot(-delta_norm, mv_norm.xyz), 0.0);
+          var this_color = light.color.xyz * ang_att * att * max(dot(-delta_norm, mv_nrm), 0.0);
           lighting = lighting + vec4<f32>(this_color, 0.0);
       }}
       out.cc{0} = clamp(lighting, vec4<f32>(0.0), vec4<f32>(1.0));
@@ -721,9 +746,9 @@ var<storage, read> v_packed_uvs: Vec2Block;
       vtxXfrAttrs += fmt::format(FMT_STRING("\n    var tc{} = vec4<f32>({}, 0.0, 1.0);"), i,
                                  vtx_attr(config, GX::Attr(GX::VA_TEX0 + (tcg.src - GX::TG_TEX0))));
     } else if (tcg.src == GX::TG_POS) {
-      vtxXfrAttrs += fmt::format(FMT_STRING("\n    var tc{} = vec4<f32>(obj_pos.xyz, 1.0);"), i);
+      vtxXfrAttrs += fmt::format(FMT_STRING("\n    var tc{} = vec4<f32>(in_pos, 1.0);"), i);
     } else if (tcg.src == GX::TG_NRM) {
-      vtxXfrAttrs += fmt::format(FMT_STRING("\n    var tc{} = vec4<f32>(obj_norm.xyz, 1.0);"), i);
+      vtxXfrAttrs += fmt::format(FMT_STRING("\n    var tc{} = vec4<f32>(in_nrm, 1.0);"), i);
     } else {
       Log.report(logvisor::Fatal, FMT_STRING("unhandled tcg src {}"), tcg.src);
       unreachable();
@@ -870,15 +895,16 @@ var<storage, read> v_packed_uvs: Vec2Block;
   const auto shaderSource =
       fmt::format(FMT_STRING(R"""({uniformPre}
 struct Uniform {{
-    mv: mat4x4<f32>;
-    mv_inv: mat4x4<f32>;
+    pos_mtx: mat4x3<f32>;
+    nrm_mtx: mat4x3<f32>;
     proj: mat4x4<f32>;{uniBufAttrs}
 }};
 @group(0) @binding(0)
 var<uniform> ubuf: Uniform;{uniformBindings}{sampBindings}{texBindings}
 
 struct VertexOutput {{
-    @builtin(position) pos: vec4<f32>;{vtxOutAttrs}
+    @builtin(position) pos: vec4<f32>;
+    @location(0) norm: vec4<f32>;{vtxOutAttrs}
 }};
 
 @stage(vertex)
@@ -891,6 +917,7 @@ fn vs_main({vtxInAttrs}
 @stage(fragment)
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {{
     var prev: vec4<f32>;{fragmentFnPre}{fragmentFn}
+    //prev = vec4<f32>(in.norm.xyz, prev.a);
     return prev;
 }}
 )"""),
