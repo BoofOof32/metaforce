@@ -11,8 +11,9 @@ struct DrawData {
 };
 
 struct PipelineConfig {
-  // nothing
+  u32 pad = 0; // empty
 };
+static_assert(std::has_unique_object_representations_v<PipelineConfig>);
 static const std::array INITIAL_PIPELINES{
     PipelineConfig{},
 };
@@ -32,7 +33,7 @@ struct alignas(4) Vert {
 };
 
 State construct_state();
-wgpu::RenderPipeline create_pipeline(const State& state, [[maybe_unused]] PipelineConfig config);
+wgpu::RenderPipeline create_pipeline(const State& state, [[maybe_unused]] const PipelineConfig& config);
 DrawData make_draw_data(const State& state, const TextureHandle& tex_y, const TextureHandle& tex_u,
                         const TextureHandle& tex_v, float h_pad, float v_pad);
 void render(const State& state, const DrawData& data, const wgpu::RenderPassEncoder& pass);

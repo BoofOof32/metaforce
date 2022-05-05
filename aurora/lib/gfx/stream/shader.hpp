@@ -11,7 +11,7 @@ struct DrawData {
   Range indexRange;
   uint32_t indexCount;
   gx::GXBindGroups bindGroups;
-  std::optional<float> dstAlpha;
+  u32 dstAlpha;
 };
 
 struct PipelineConfig : public gx::PipelineConfig {};
@@ -19,6 +19,6 @@ struct PipelineConfig : public gx::PipelineConfig {};
 struct State {};
 
 State construct_state();
-wgpu::RenderPipeline create_pipeline(const State& state, [[maybe_unused]] PipelineConfig config);
+wgpu::RenderPipeline create_pipeline(const State& state, [[maybe_unused]] const PipelineConfig& config);
 void render(const State& state, const DrawData& data, const wgpu::RenderPassEncoder& pass);
 } // namespace aurora::gfx::stream

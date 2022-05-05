@@ -25,6 +25,11 @@ void ClearIniSettings();
 namespace aurora::gfx {
 extern std::atomic_uint32_t queuedPipelines;
 extern std::atomic_uint32_t createdPipelines;
+
+extern size_t g_lastVertSize;
+extern size_t g_lastUniformSize;
+extern size_t g_lastIndexSize;
+extern size_t g_lastStorageSize;
 } // namespace aurora::gfx
 
 #include "TCastTo.hpp" // Generated file, do not modify include path
@@ -740,6 +745,20 @@ std::optional<std::string> ImGuiConsole::ShowAboutWindow(bool canClose, std::str
   return result;
 }
 
+static std::string BytesToString(size_t bytes) {
+  constexpr std::array suffixes{"B"sv, "KB"sv, "MB"sv, "GB"sv, "TB"sv, "PB"sv, "EB"sv};
+  u32 s = 0;
+  auto count = static_cast<double>(bytes);
+  while (count >= 1024.0 && s < 7) {
+    s++;
+    count /= 1024.0;
+  }
+  if (count - floor(count) == 0.0) {
+    return fmt::format(FMT_STRING("{}{}"), static_cast<size_t>(count), suffixes[s]);
+  }
+  return fmt::format(FMT_STRING("{:.1f}{}"), count, suffixes[s]);
+}
+
 void ImGuiConsole::ShowDebugOverlay() {
   if (!m_frameCounter && !m_frameRate && !m_inGameTime && !m_roomTimer && !m_playerInfo && !m_areaInfo &&
       !m_worldInfo && !m_randomStats && !m_resourceStats && !m_pipelineInfo) {
@@ -907,6 +926,17 @@ void ImGuiConsole::ShowDebugOverlay() {
 
       ImGuiStringViewText(fmt::format(FMT_STRING("Queued pipelines: {}\n"), aurora::gfx::queuedPipelines));
       ImGuiStringViewText(fmt::format(FMT_STRING("Done pipelines:   {}\n"), aurora::gfx::createdPipelines));
+      ImGuiStringViewText(
+          fmt::format(FMT_STRING("Vertex size:      {}\n"), BytesToString(aurora::gfx::g_lastVertSize)));
+      ImGuiStringViewText(
+          fmt::format(FMT_STRING("Uniform size:     {}\n"), BytesToString(aurora::gfx::g_lastUniformSize)));
+      ImGuiStringViewText(
+          fmt::format(FMT_STRING("Index size:       {}\n"), BytesToString(aurora::gfx::g_lastIndexSize)));
+      ImGuiStringViewText(
+          fmt::format(FMT_STRING("Storage size:     {}\n"), BytesToString(aurora::gfx::g_lastStorageSize)));
+      ImGuiStringViewText(fmt::format(FMT_STRING("Total:            {}\n"),
+                                      BytesToString(aurora::gfx::g_lastVertSize + aurora::gfx::g_lastUniformSize +
+                                                    aurora::gfx::g_lastIndexSize + aurora::gfx::g_lastStorageSize)));
     }
     ShowCornerContextMenu(m_debugOverlayCorner, m_inputOverlayCorner);
   }
@@ -1261,6 +1291,7 @@ void ImGuiConsole::PreUpdate() {
   ShowDebugOverlay();
   ShowInputViewer();
   ShowPlayerTransformEditor();
+  ShowPipelineProgress();
 }
 
 void ImGuiConsole::PostUpdate() {
@@ -1675,6 +1706,33 @@ void ImGuiConsole::ShowPlayerTransformEditor() {
       ImGui::PopID();
     }
   }
+  ImGui::End();
+}
+
+void ImGuiConsole::ShowPipelineProgress() {
+  const u32 queuedPipelines = aurora::gfx::queuedPipelines;
+  if (queuedPipelines == 0) {
+    return;
+  }
+  const u32 createdPipelines = aurora::gfx::createdPipelines;
+  const u32 totalPipelines = queuedPipelines + createdPipelines;
+
+  const auto* viewport = ImGui::GetMainViewport();
+  const auto padding = viewport->WorkPos.y + 10.f;
+  const auto halfWidth = viewport->GetWorkCenter().x;
+  ImGui::SetNextWindowPos(ImVec2{halfWidth, padding}, ImGuiCond_Always, ImVec2{0.5f, 0.f});
+  ImGui::SetNextWindowSize(ImVec2{halfWidth, 0.f}, ImGuiCond_Always);
+  ImGui::SetNextWindowBgAlpha(0.65f);
+  ImGui::Begin("Pipelines", nullptr,
+               ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoMove |
+                   ImGuiWindowFlags_NoSavedSettings);
+  const auto percent = static_cast<float>(createdPipelines) / static_cast<float>(totalPipelines);
+  const auto progressStr = fmt::format(FMT_STRING("Processing pipelines: {} / {}"), createdPipelines, totalPipelines);
+  const auto textSize = ImGui::CalcTextSize(progressStr.data(), progressStr.data() + progressStr.size());
+  ImGui::NewLine();
+  ImGui::SameLine(ImGui::GetWindowWidth() / 2.f - textSize.x + textSize.x / 2.f);
+  ImGuiStringViewText(progressStr);
+  ImGui::ProgressBar(percent);
   ImGui::End();
 }
 } // namespace metaforce

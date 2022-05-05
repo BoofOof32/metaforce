@@ -125,7 +125,7 @@ void initialize(SDL_Window* window) {
 
   {
     std::vector<dawn::native::Adapter> adapters = g_Instance->GetAdapters();
-    auto adapterIt = std::find_if(adapters.begin(), adapters.end(), [](const dawn::native::Adapter adapter) -> bool {
+    const auto adapterIt = std::find_if(adapters.begin(), adapters.end(), [](const auto& adapter) -> bool {
       wgpu::AdapterProperties properties;
       adapter.GetProperties(&properties);
       return properties.backendType == preferredBackendType;
@@ -144,13 +144,18 @@ void initialize(SDL_Window* window) {
              g_AdapterProperties.driverDescription);
 
   {
-    WGPUSupportedLimits supportedLimits{};
+    WGPUSupportedLimits supportedLimits;
     g_Adapter.GetLimits(&supportedLimits);
     const wgpu::RequiredLimits requiredLimits{
         .limits =
             {
-                .minUniformBufferOffsetAlignment = supportedLimits.limits.minUniformBufferOffsetAlignment,
-                .minStorageBufferOffsetAlignment = supportedLimits.limits.minStorageBufferOffsetAlignment,
+                // Use "best" supported alignments
+                .minUniformBufferOffsetAlignment = supportedLimits.limits.minUniformBufferOffsetAlignment == 0
+                                                       ? static_cast<uint32_t>(WGPU_LIMIT_U32_UNDEFINED)
+                                                       : supportedLimits.limits.minUniformBufferOffsetAlignment,
+                .minStorageBufferOffsetAlignment = supportedLimits.limits.minStorageBufferOffsetAlignment == 0
+                                                       ? static_cast<uint32_t>(WGPU_LIMIT_U32_UNDEFINED)
+                                                       : supportedLimits.limits.minStorageBufferOffsetAlignment,
             },
     };
     const std::array<wgpu::FeatureName, 1> requiredFeatures{

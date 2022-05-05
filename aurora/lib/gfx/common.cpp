@@ -1,17 +1,16 @@
 #include "common.hpp"
 
 #include "../gpu.hpp"
-#include "colored_quad/shader.hpp"
+#include "model/shader.hpp"
 #include "movie_player/shader.hpp"
 #include "stream/shader.hpp"
-#include "textured_quad/shader.hpp"
-#include "model/shader.hpp"
 
+#include <absl/container/flat_hash_map.h>
 #include <condition_variable>
 #include <deque>
 #include <logvisor/logvisor.hpp>
 #include <thread>
-#include <absl/container/flat_hash_map.h>
+#include <fstream>
 
 namespace aurora::gfx {
 static logvisor::Module Log("aurora::gfx");
@@ -23,17 +22,15 @@ using gpu::g_queue;
 std::vector<std::string> g_debugGroupStack;
 #endif
 
-constexpr uint64_t UniformBufferSize = 5242880;   // 5mb
-constexpr uint64_t VertexBufferSize = 5242880;    // 5mb
-constexpr uint64_t IndexBufferSize = 2097152;     // 2mb
-constexpr uint64_t StorageBufferSize = 134217728; // 128mb
+constexpr uint64_t UniformBufferSize = 3145728; // 3mb
+constexpr uint64_t VertexBufferSize = 3145728;  // 3mb
+constexpr uint64_t IndexBufferSize = 1048576;   // 1mb
+constexpr uint64_t StorageBufferSize = 8388608; // 8mb
 
 constexpr uint64_t StagingBufferSize = UniformBufferSize + VertexBufferSize + IndexBufferSize + StorageBufferSize;
 
 struct ShaderState {
   movie_player::State moviePlayer;
-  colored_quad::State coloredQuad;
-  textured_quad::State texturedQuad;
   stream::State stream;
   model::State model;
 };
@@ -41,20 +38,8 @@ struct ShaderDrawCommand {
   ShaderType type;
   union {
     movie_player::DrawData moviePlayer;
-    colored_quad::DrawData coloredQuad;
-    textured_quad::DrawData texturedQuad;
     stream::DrawData stream;
     model::DrawData model;
-  };
-};
-struct PipelineCreateCommand {
-  ShaderType type;
-  union {
-    movie_player::PipelineConfig moviePlayer;
-    colored_quad::PipelineConfig coloredQuad;
-    textured_quad::PipelineConfig texturedQuad;
-    stream::PipelineConfig stream;
-    model::PipelineConfig model;
   };
 };
 enum class CommandType {
@@ -90,108 +75,21 @@ struct Command {
 } // namespace aurora::gfx
 
 namespace aurora {
+// For types that we can't ensure are safe to hash with has_unique_object_representations,
+// we create specialized methods to handle them. Note that these are highly dependent on
+// the structure definition, which could easily change with Dawn updates.
 template <>
-inline void xxh3_update(XXH3_state_t& state, const gfx::colored_quad::PipelineConfig& input) {
-  XXH3_64bits_update(&state, &input.filterType, sizeof(gfx::colored_quad::PipelineConfig::filterType));
-  XXH3_64bits_update(&state, &input.zComparison, sizeof(gfx::colored_quad::PipelineConfig::zComparison));
-  XXH3_64bits_update(&state, &input.zTest, sizeof(gfx::colored_quad::PipelineConfig::zTest));
+inline XXH64_hash_t xxh3_hash(const wgpu::BindGroupDescriptor& input, XXH64_hash_t seed) {
+  constexpr auto offset = sizeof(void*) * 2; // skip nextInChain, label
+  const auto hash = xxh3_hash_s(reinterpret_cast<const u8*>(&input) + offset,
+                                sizeof(wgpu::BindGroupDescriptor) - offset - sizeof(void*) /* skip entries */, seed);
+  return xxh3_hash_s(input.entries, sizeof(wgpu::BindGroupEntry) * input.entryCount, hash);
 }
 template <>
-inline void xxh3_update(XXH3_state_t& state, const gfx::textured_quad::PipelineConfig& input) {
-  XXH3_64bits_update(&state, &input.filterType, sizeof(gfx::textured_quad::PipelineConfig::filterType));
-  XXH3_64bits_update(&state, &input.zComparison, sizeof(gfx::textured_quad::PipelineConfig::zComparison));
-  XXH3_64bits_update(&state, &input.zTest, sizeof(gfx::textured_quad::PipelineConfig::zTest));
-}
-template <>
-inline void xxh3_update(XXH3_state_t& state, const gfx::movie_player::PipelineConfig& input) {
-  // no-op
-}
-template <>
-inline void xxh3_update(XXH3_state_t& state, const gfx::gx::PipelineConfig& input) {
-  xxh3_update(state, input.shaderConfig);
-  XXH3_64bits_update(&state, &input.primitive, sizeof(gfx::gx::PipelineConfig::primitive));
-  XXH3_64bits_update(&state, &input.depthFunc, sizeof(gfx::gx::PipelineConfig::depthFunc));
-  XXH3_64bits_update(&state, &input.cullMode, sizeof(gfx::gx::PipelineConfig::cullMode));
-  XXH3_64bits_update(&state, &input.blendMode, sizeof(gfx::gx::PipelineConfig::blendMode));
-  XXH3_64bits_update(&state, &input.blendFacSrc, sizeof(gfx::gx::PipelineConfig::blendFacSrc));
-  XXH3_64bits_update(&state, &input.blendFacDst, sizeof(gfx::gx::PipelineConfig::blendFacDst));
-  XXH3_64bits_update(&state, &input.blendOp, sizeof(gfx::gx::PipelineConfig::blendOp));
-  if (input.dstAlpha) {
-    XXH3_64bits_update(&state, &*input.dstAlpha, sizeof(float));
-  }
-  XXH3_64bits_update(&state, &input.depthCompare, sizeof(gfx::gx::PipelineConfig::depthCompare));
-  XXH3_64bits_update(&state, &input.depthUpdate, sizeof(gfx::gx::PipelineConfig::depthUpdate));
-  XXH3_64bits_update(&state, &input.alphaUpdate, sizeof(gfx::gx::PipelineConfig::alphaUpdate));
-}
-template <>
-inline void xxh3_update(XXH3_state_t& state, const gfx::stream::PipelineConfig& input) {
-  xxh3_update<gfx::gx::PipelineConfig>(state, input);
-}
-template <>
-inline void xxh3_update(XXH3_state_t& state, const gfx::model::PipelineConfig& input) {
-  xxh3_update<gfx::gx::PipelineConfig>(state, input);
-}
-template <>
-inline void xxh3_update(XXH3_state_t& state, const gfx::PipelineCreateCommand& input) {
-  XXH3_64bits_update(&state, &input.type, sizeof(gfx::PipelineCreateCommand::type));
-  switch (input.type) {
-  case gfx::ShaderType::Aabb:
-    // TODO
-    break;
-  case gfx::ShaderType::ColoredQuad:
-    xxh3_update(state, input.coloredQuad);
-    break;
-  case gfx::ShaderType::TexturedQuad:
-    xxh3_update(state, input.texturedQuad);
-    break;
-  case gfx::ShaderType::MoviePlayer:
-    xxh3_update(state, input.moviePlayer);
-    break;
-  case gfx::ShaderType::Stream:
-    xxh3_update(state, input.stream);
-    break;
-  case gfx::ShaderType::Model:
-    xxh3_update(state, input.model);
-    break;
-  }
-}
-template <>
-inline void xxh3_update(XXH3_state_t& state, const wgpu::BindGroupEntry& input) {
-  XXH3_64bits_update(&state, &input.binding, sizeof(wgpu::BindGroupEntry::binding));
-  XXH3_64bits_update(&state, &input.buffer, sizeof(wgpu::BindGroupEntry::buffer));
-  XXH3_64bits_update(&state, &input.offset, sizeof(wgpu::BindGroupEntry::offset));
-  if (input.buffer != nullptr) {
-    XXH3_64bits_update(&state, &input.size, sizeof(wgpu::BindGroupEntry::size));
-  }
-  XXH3_64bits_update(&state, &input.sampler, sizeof(wgpu::BindGroupEntry::sampler));
-  XXH3_64bits_update(&state, &input.textureView, sizeof(wgpu::BindGroupEntry::textureView));
-}
-template <>
-inline void xxh3_update(XXH3_state_t& state, const wgpu::BindGroupDescriptor& input) {
-  if (input.label != nullptr) {
-    XXH3_64bits_update(&state, input.label, strlen(input.label));
-  }
-  XXH3_64bits_update(&state, &input.layout, sizeof(wgpu::BindGroupDescriptor::layout));
-  XXH3_64bits_update(&state, &input.entryCount, sizeof(wgpu::BindGroupDescriptor::entryCount));
-  for (int i = 0; i < input.entryCount; ++i) {
-    xxh3_update(state, input.entries[i]);
-  }
-}
-template <>
-inline void xxh3_update(XXH3_state_t& state, const wgpu::SamplerDescriptor& input) {
-  if (input.label != nullptr) {
-    XXH3_64bits_update(&state, input.label, strlen(input.label));
-  }
-  XXH3_64bits_update(&state, &input.addressModeU, sizeof(wgpu::SamplerDescriptor::addressModeU));
-  XXH3_64bits_update(&state, &input.addressModeV, sizeof(wgpu::SamplerDescriptor::addressModeV));
-  XXH3_64bits_update(&state, &input.addressModeW, sizeof(wgpu::SamplerDescriptor::addressModeW));
-  XXH3_64bits_update(&state, &input.magFilter, sizeof(wgpu::SamplerDescriptor::magFilter));
-  XXH3_64bits_update(&state, &input.minFilter, sizeof(wgpu::SamplerDescriptor::minFilter));
-  XXH3_64bits_update(&state, &input.mipmapFilter, sizeof(wgpu::SamplerDescriptor::mipmapFilter));
-  XXH3_64bits_update(&state, &input.lodMinClamp, sizeof(wgpu::SamplerDescriptor::lodMinClamp));
-  XXH3_64bits_update(&state, &input.lodMaxClamp, sizeof(wgpu::SamplerDescriptor::lodMaxClamp));
-  XXH3_64bits_update(&state, &input.compare, sizeof(wgpu::SamplerDescriptor::compare));
-  XXH3_64bits_update(&state, &input.maxAnisotropy, sizeof(wgpu::SamplerDescriptor::maxAnisotropy));
+inline XXH64_hash_t xxh3_hash(const wgpu::SamplerDescriptor& input, XXH64_hash_t seed) {
+  constexpr auto offset = sizeof(void*) * 2; // skip nextInChain, label
+  return xxh3_hash_s(reinterpret_cast<const u8*>(&input) + offset,
+                     sizeof(wgpu::SamplerDescriptor) - offset - 2 /* skip padding */, seed);
 }
 } // namespace aurora
 
@@ -220,14 +118,30 @@ wgpu::Buffer g_indexBuffer;
 wgpu::Buffer g_storageBuffer;
 size_t g_staticStorageLastSize = 0;
 static std::array<wgpu::Buffer, 3> g_stagingBuffers;
+static wgpu::SupportedLimits g_cachedLimits;
 
 static ShaderState g_state;
 static PipelineRef g_currentPipeline;
 
 static std::vector<Command> g_commands;
 
-static PipelineRef find_pipeline(PipelineCreateCommand command, NewPipelineCallback&& cb) {
-  const auto hash = xxh3_hash(command);
+static ByteBuffer g_serializedPipelines{};
+static u32 g_serializedPipelineCount = 0;
+
+template <typename PipelineConfig>
+static void serialize_pipeline_config(ShaderType type, const PipelineConfig& config) {
+  static_assert(std::has_unique_object_representations_v<PipelineConfig>);
+  g_serializedPipelines.append(&type, sizeof(type));
+  const u32 configSize = sizeof(config);
+  g_serializedPipelines.append(&configSize, sizeof(configSize));
+  g_serializedPipelines.append(&config, configSize);
+  ++g_serializedPipelineCount;
+}
+
+template <typename PipelineConfig>
+static PipelineRef find_pipeline(ShaderType type, const PipelineConfig& config, NewPipelineCallback&& cb,
+                                 bool serialize = true) {
+  PipelineRef hash = xxh3_hash(config, static_cast<XXH64_hash_t>(type));
   bool found = false;
   {
     std::scoped_lock guard{g_pipelineMutex};
@@ -241,11 +155,17 @@ static PipelineRef find_pipeline(PipelineCreateCommand command, NewPipelineCallb
         }
       } else {
         g_pipelines.try_emplace(hash, cb());
+        if (serialize) {
+          serialize_pipeline_config(type, config);
+        }
         found = true;
       }
     }
     if (!found) {
       g_queuedPipelines.emplace_back(std::pair{hash, std::move(cb)});
+      if (serialize) {
+        serialize_pipeline_config(type, config);
+      }
     }
   }
   if (!found) {
@@ -264,8 +184,6 @@ static void push_draw_command(ShaderDrawCommand data) {
       .data = {.draw = data},
   });
 }
-
-bool get_dxt_compression_supported() noexcept { return g_device.HasFeature(wgpu::FeatureName::TextureCompressionBC); }
 
 static Command::Data::SetViewportCommand g_cachedViewport;
 void set_viewport(float left, float top, float width, float height, float znear, float zfar) noexcept {
@@ -303,57 +221,6 @@ void resolve_depth(const ClipRect& rect, uint32_t bind) noexcept {
   // TODO
 }
 
-void add_material_set(/* TODO */) noexcept {}
-void add_model(/* TODO */) noexcept {}
-
-void queue_aabb(const zeus::CAABox& aabb, const zeus::CColor& color, bool z_only) noexcept {
-  // TODO
-}
-
-void queue_fog_volume_plane(const ArrayRef<zeus::CVector4f>& verts, uint8_t pass) {
-  // TODO
-}
-
-void queue_fog_volume_filter(const zeus::CColor& color, bool two_way) noexcept {
-  // TODO
-}
-
-void queue_textured_quad_verts(CameraFilterType filter_type, const TextureHandle& texture, ZComp z_comparison,
-                               bool z_test, const zeus::CColor& color, const ArrayRef<zeus::CVector3f>& pos,
-                               const ArrayRef<zeus::CVector2f>& uvs, float lod) noexcept {
-  auto data = textured_quad::make_draw_data_verts(g_state.texturedQuad, filter_type, texture, z_comparison, z_test,
-                                                  color, pos, uvs, lod);
-  push_draw_command({.type = ShaderType::TexturedQuad, .texturedQuad = data});
-}
-void queue_textured_quad(CameraFilterType filter_type, const TextureHandle& texture, ZComp z_comparison, bool z_test,
-                         const zeus::CColor& color, float uv_scale, const zeus::CRectangle& rect, float z,
-                         float lod) noexcept {
-  auto data = textured_quad::make_draw_data(g_state.texturedQuad, filter_type, texture, z_comparison, z_test, color,
-                                            uv_scale, rect, z, lod);
-  push_draw_command({.type = ShaderType::TexturedQuad, .texturedQuad = data});
-}
-template <>
-PipelineRef pipeline_ref(textured_quad::PipelineConfig config) {
-  return find_pipeline({.type = ShaderType::TexturedQuad, .texturedQuad = config},
-                       [=]() { return create_pipeline(g_state.texturedQuad, config); });
-}
-
-void queue_colored_quad_verts(CameraFilterType filter_type, ZComp z_comparison, bool z_test, const zeus::CColor& color,
-                              const ArrayRef<zeus::CVector3f>& pos) noexcept {
-  auto data = colored_quad::make_draw_data_verts(g_state.coloredQuad, filter_type, z_comparison, z_test, color, pos);
-  push_draw_command({.type = ShaderType::ColoredQuad, .coloredQuad = data});
-}
-void queue_colored_quad(CameraFilterType filter_type, ZComp z_comparison, bool z_test, const zeus::CColor& color,
-                        const zeus::CRectangle& rect, float z) noexcept {
-  auto data = colored_quad::make_draw_data(g_state.coloredQuad, filter_type, z_comparison, z_test, color, rect, z);
-  push_draw_command({.type = ShaderType::ColoredQuad, .coloredQuad = data});
-}
-template <>
-PipelineRef pipeline_ref(colored_quad::PipelineConfig config) {
-  return find_pipeline({.type = ShaderType::ColoredQuad, .coloredQuad = config},
-                       [=]() { return create_pipeline(g_state.coloredQuad, config); });
-}
-
 void queue_movie_player(const TextureHandle& tex_y, const TextureHandle& tex_u, const TextureHandle& tex_v, float h_pad,
                         float v_pad) noexcept {
   auto data = movie_player::make_draw_data(g_state.moviePlayer, tex_y, tex_u, tex_v, h_pad, v_pad);
@@ -361,8 +228,7 @@ void queue_movie_player(const TextureHandle& tex_y, const TextureHandle& tex_u, 
 }
 template <>
 PipelineRef pipeline_ref(movie_player::PipelineConfig config) {
-  return find_pipeline({.type = ShaderType::MoviePlayer, .moviePlayer = config},
-                       [=]() { return create_pipeline(g_state.moviePlayer, config); });
+  return find_pipeline(ShaderType::MoviePlayer, config, [=]() { return create_pipeline(g_state.moviePlayer, config); });
 }
 
 template <>
@@ -375,8 +241,7 @@ void push_draw_command(stream::DrawData data) {
 }
 template <>
 PipelineRef pipeline_ref(stream::PipelineConfig config) {
-  return find_pipeline({.type = ShaderType::Stream, .stream = config},
-                       [=]() { return create_pipeline(g_state.stream, config); });
+  return find_pipeline(ShaderType::Stream, config, [=]() { return create_pipeline(g_state.stream, config); });
 }
 
 template <>
@@ -385,8 +250,7 @@ void push_draw_command(model::DrawData data) {
 }
 template <>
 PipelineRef pipeline_ref(model::PipelineConfig config) {
-  return find_pipeline({.type = ShaderType::Model, .model = config},
-                       [=]() { return create_pipeline(g_state.model, config); });
+  return find_pipeline(ShaderType::Model, config, [=]() { return create_pipeline(g_state.model, config); });
 }
 
 static void pipeline_worker() {
@@ -426,6 +290,9 @@ void initialize() {
     g_hasPipelineThread = true;
   }
 
+  // For uniform & storage buffer offset alignments
+  g_device.GetLimits(&g_cachedLimits);
+
   const auto createBuffer = [](wgpu::Buffer& out, wgpu::BufferUsage usage, uint64_t size, const char* label) {
     const wgpu::BufferDescriptor descriptor{
         .label = label,
@@ -443,16 +310,74 @@ void initialize() {
   createBuffer(g_storageBuffer, wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst, StorageBufferSize,
                "Shared Storage Buffer");
   for (int i = 0; i < g_stagingBuffers.size(); ++i) {
+    const auto label = fmt::format(FMT_STRING("Staging Buffer {}"), i);
     createBuffer(g_stagingBuffers[i], wgpu::BufferUsage::MapWrite | wgpu::BufferUsage::CopySrc, StagingBufferSize,
-                 "Staging Buffer");
+                 label.c_str());
   }
   map_staging_buffer();
 
   g_state.moviePlayer = movie_player::construct_state();
-  g_state.coloredQuad = colored_quad::construct_state();
-  g_state.texturedQuad = textured_quad::construct_state();
   g_state.stream = stream::construct_state();
   g_state.model = model::construct_state();
+
+  {
+    // Load serialized pipeline cache
+    std::ifstream file("pipeline_cache.bin", std::ios::in | std::ios::binary | std::ios::ate);
+    const size_t size = file.tellg();
+    file.seekg(0, std::ios::beg);
+    constexpr size_t headerSize = sizeof(g_serializedPipelineCount);
+    if (size != -1 && size > headerSize) {
+      g_serializedPipelines.append_zeroes(size - headerSize);
+      file.read(reinterpret_cast<char*>(&g_serializedPipelineCount), headerSize);
+      file.read(reinterpret_cast<char*>(g_serializedPipelines.data()), size - headerSize);
+    }
+  }
+  if (g_serializedPipelineCount > 0) {
+    size_t offset = 0;
+    while (offset < g_serializedPipelines.size()) {
+      ShaderType type = *reinterpret_cast<const ShaderType*>(g_serializedPipelines.data() + offset);
+      offset += sizeof(ShaderType);
+      u32 size = *reinterpret_cast<const u32*>(g_serializedPipelines.data() + offset);
+      offset += sizeof(u32);
+      switch (type) {
+      case ShaderType::MoviePlayer: {
+        if (size != sizeof(movie_player::PipelineConfig)) {
+          break;
+        }
+        const auto config =
+            *reinterpret_cast<const movie_player::PipelineConfig*>(g_serializedPipelines.data() + offset);
+        find_pipeline(
+            type, config, [=]() { return movie_player::create_pipeline(g_state.moviePlayer, config); }, false);
+      } break;
+      case ShaderType::Stream: {
+        if (size != sizeof(stream::PipelineConfig)) {
+          break;
+        }
+        const auto config = *reinterpret_cast<const stream::PipelineConfig*>(g_serializedPipelines.data() + offset);
+        if (config.version != gx::GXPipelineConfigVersion) {
+          break;
+        }
+        find_pipeline(
+            type, config, [=]() { return stream::create_pipeline(g_state.stream, config); }, false);
+      } break;
+      case ShaderType::Model: {
+        if (size != sizeof(model::PipelineConfig)) {
+          break;
+        }
+        const auto config = *reinterpret_cast<const model::PipelineConfig*>(g_serializedPipelines.data() + offset);
+        if (config.version != gx::GXPipelineConfigVersion) {
+          break;
+        }
+        find_pipeline(
+            type, config, [=]() { return model::create_pipeline(g_state.model, config); }, false);
+      } break;
+      default:
+        Log.report(logvisor::Warning, FMT_STRING("Unknown pipeline type {}"), type);
+        break;
+      }
+      offset += size;
+    }
+  }
 }
 
 void shutdown() {
@@ -460,6 +385,13 @@ void shutdown() {
     g_pipelineThreadEnd = true;
     g_pipelineCv.notify_all();
     g_pipelineThread.join();
+  }
+
+  {
+    // Write serialized pipelines to file
+    std::ofstream file("pipeline_cache.bin", std::ios::out | std::ios::trunc | std::ios::binary);
+    file.write(reinterpret_cast<const char*>(&g_serializedPipelineCount), sizeof(g_serializedPipelineCount));
+    file.write(reinterpret_cast<const char*>(g_serializedPipelines.data()), g_serializedPipelines.size());
   }
 
   gx::shutdown();
@@ -510,6 +442,12 @@ void begin_frame() {
   mapBuffer(g_storage, StorageBufferSize);
 }
 
+// for imgui debug
+size_t g_lastVertSize;
+size_t g_lastUniformSize;
+size_t g_lastIndexSize;
+size_t g_lastStorageSize;
+
 void end_frame(const wgpu::CommandEncoder& cmd) {
   uint64_t bufferOffset = 0;
   const auto writeBuffer = [&](ByteBuffer& buf, wgpu::Buffer& out, uint64_t size, std::string_view label) {
@@ -519,12 +457,13 @@ void end_frame(const wgpu::CommandEncoder& cmd) {
       buf.clear();
     }
     bufferOffset += size;
+    return writeSize;
   };
   g_stagingBuffers[currentStagingBuffer].Unmap();
-  writeBuffer(g_verts, g_vertexBuffer, VertexBufferSize, "Vertex");
-  writeBuffer(g_uniforms, g_uniformBuffer, UniformBufferSize, "Uniform");
-  writeBuffer(g_indices, g_indexBuffer, IndexBufferSize, "Index");
-  writeBuffer(g_storage, g_storageBuffer, StorageBufferSize, "Storage");
+  g_lastVertSize = writeBuffer(g_verts, g_vertexBuffer, VertexBufferSize, "Vertex");
+  g_lastUniformSize = writeBuffer(g_uniforms, g_uniformBuffer, UniformBufferSize, "Uniform");
+  g_lastIndexSize = writeBuffer(g_indices, g_indexBuffer, IndexBufferSize, "Index");
+  g_lastStorageSize = writeBuffer(g_storage, g_storageBuffer, StorageBufferSize, "Storage");
   currentStagingBuffer = (currentStagingBuffer + 1) % g_stagingBuffers.size();
   map_staging_buffer();
 }
@@ -566,15 +505,6 @@ void render(const wgpu::RenderPassEncoder& pass) {
     case CommandType::Draw: {
       const auto& draw = cmd.data.draw;
       switch (draw.type) {
-      case ShaderType::Aabb:
-        // TODO
-        break;
-      case ShaderType::ColoredQuad:
-        colored_quad::render(g_state.coloredQuad, draw.coloredQuad, pass);
-        break;
-      case ShaderType::TexturedQuad:
-        textured_quad::render(g_state.texturedQuad, draw.texturedQuad, pass);
-        break;
       case ShaderType::MoviePlayer:
         movie_player::render(g_state.moviePlayer, draw.moviePlayer, pass);
         break;
@@ -644,19 +574,13 @@ static inline Range map(ByteBuffer& target, size_t length, size_t alignment) {
 Range push_verts(const uint8_t* data, size_t length) { return push(g_verts, data, length, 4); }
 Range push_indices(const uint8_t* data, size_t length) { return push(g_indices, data, length, 4); }
 Range push_uniform(const uint8_t* data, size_t length) {
-  wgpu::SupportedLimits limits;
-  g_device.GetLimits(&limits);
-  return push(g_uniforms, data, length, limits.limits.minUniformBufferOffsetAlignment);
+  return push(g_uniforms, data, length, g_cachedLimits.limits.minUniformBufferOffsetAlignment);
 }
 Range push_storage(const uint8_t* data, size_t length) {
-  wgpu::SupportedLimits limits;
-  g_device.GetLimits(&limits);
-  return push(g_storage, data, length, limits.limits.minStorageBufferOffsetAlignment);
+  return push(g_storage, data, length, g_cachedLimits.limits.minStorageBufferOffsetAlignment);
 }
 Range push_static_storage(const uint8_t* data, size_t length) {
-  wgpu::SupportedLimits limits;
-  g_device.GetLimits(&limits);
-  auto range = push(g_staticStorage, data, length, limits.limits.minStorageBufferOffsetAlignment);
+  auto range = push(g_staticStorage, data, length, g_cachedLimits.limits.minStorageBufferOffsetAlignment);
   range.isStatic = true;
   return range;
 }
@@ -669,15 +593,11 @@ std::pair<ByteBuffer, Range> map_indices(size_t length) {
   return {ByteBuffer{g_indices.data() + range.offset, range.size}, range};
 }
 std::pair<ByteBuffer, Range> map_uniform(size_t length) {
-  wgpu::SupportedLimits limits;
-  g_device.GetLimits(&limits);
-  const auto range = map(g_uniforms, length, limits.limits.minUniformBufferOffsetAlignment);
+  const auto range = map(g_uniforms, length, g_cachedLimits.limits.minUniformBufferOffsetAlignment);
   return {ByteBuffer{g_uniforms.data() + range.offset, range.size}, range};
 }
 std::pair<ByteBuffer, Range> map_storage(size_t length) {
-  wgpu::SupportedLimits limits;
-  g_device.GetLimits(&limits);
-  const auto range = map(g_storage, length, limits.limits.minStorageBufferOffsetAlignment);
+  const auto range = map(g_storage, length, g_cachedLimits.limits.minStorageBufferOffsetAlignment);
   return {ByteBuffer{g_storage.data() + range.offset, range.size}, range};
 }
 
@@ -707,9 +627,7 @@ const wgpu::Sampler& sampler_ref(const wgpu::SamplerDescriptor& descriptor) {
 }
 
 uint32_t align_uniform(uint32_t value) {
-  wgpu::SupportedLimits limits;
-  g_device.GetLimits(&limits); // TODO cache
-  const auto uniform_alignment = limits.limits.minUniformBufferOffsetAlignment;
+  const auto uniform_alignment = g_cachedLimits.limits.minUniformBufferOffsetAlignment;
   return ALIGN(value, uniform_alignment);
 }
 
