@@ -20,7 +20,7 @@ Builds available at [https://releases.axiodl.com](https://releases.axiodl.com).
 ### Usage (GUI)
 
 Windows:
-- Open `metaforce-gui.exe`
+- Open `metaforce.exe`
 
 macOS:
 - Open `Metaforce.app`
@@ -30,11 +30,7 @@ Linux:
 - Open `Metaforce-*.AppImage`
 
 ### CLI usage (GC versions)
-
-* Extract ISO: `hecl extract [path].iso -o mp1`
-  * `mp1` can be substituted with the directory name of your choice
-* Repackage game for Metaforce: `cd mp1; hecl package`
-* Run Metaforce: `metaforce mp1/out`
+* Run Metaforce: `metaforce mp1.iso `
 
 ### CLI usage (Wii versions)
 
@@ -42,11 +38,7 @@ Linux:
 
 NFS files dumped from Metroid Prime Trilogy on Wii U VC can be used directly without converting to ISO.
 
-* Extract ISO or NFS: `hecl extract [path].[iso/nfs] -o mpt`
-  * `mpt` can be substituted with the directory name of your choice
-* Repackage game for Metaforce: `cd mpt; hecl package MP1`
-  * The `MP1` parameter is important here.
-* Run Metaforce: `metaforce mpt/out --warp 1 0`
+* Run Metaforce: `metaforce mpt.iso --warp 1 0`
 
 #### Metaforce options (non-exhaustive)
 
@@ -156,16 +148,3 @@ Then open `metaforce.xcodeproj`
 We provide custom debug models for use to visualize certain aspects of the game such as lighting, in order to use 
 these models you may download them from https://axiodl.com/files/debug_models.zip and extract to `MP1/URDE` in an 
 existing HECL project (assuming paths are relative), then run the following command:
-
-```sh
-hecl package MP1/URDE
-```
-This will cook and package the debug models and will automatically enable rendering of lights in a debug build of Metaforce.
-
-### Blender Known Issues
-On Windows it is known that paths >240 characters will cause blender to fail while attempting to open/create a file, causing hecl to stall.  
-We currently do not have a good fix for this issue, however a workaround is to place hecl near the root of your directory tree
-and executing from there e.g:  
-`D:\HECLProjects\`  
-Another work around is to install a version of python that matches the one blender ships with and renaming the python directory in the blender directory to `python.bak`.  
-This will force blender to use the system's python if it's available and will not have the same path limitation
