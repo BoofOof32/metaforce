@@ -21,6 +21,7 @@
 #define NOMINMAX
 #endif
 #include <Windows.h>
+#include <shellapi.h>
 #endif
 
 #include "../version.h"
@@ -28,6 +29,7 @@
 //#include <fenv.h>
 //#pragma STDC FENV_ACCESS ON
 
+#include <SDL_main.h>
 #include <aurora/aurora.hpp>
 
 using namespace std::literals;
@@ -144,109 +146,6 @@ static std::string CPUFeatureString(const zeus::CPUInfo& cpuInf) {
 #endif
   return features;
 }
-#if 0
-struct WindowCallback : boo::IWindowCallback {
-  friend struct Application;
-
-private:
-  bool m_fullscreenToggleRequested = false;
-  boo::SWindowRect m_lastRect;
-  bool m_rectDirty = false;
-  bool m_windowInvalid = false;
-  //  ImGuiWindowCallback m_imguiCallback;
-
-  void resized(const boo::SWindowRect& rect, bool sync) override {
-    m_lastRect = rect;
-    m_rectDirty = true;
-    //    m_imguiCallback.resized(rect, sync);
-  }
-
-  void mouseDown(const boo::SWindowCoord& coord, EMouseButton button, boo::EModifierKey mods) override {
-    //    if (!ImGuiWindowCallback::m_mouseCaptured && g_mainMP1) {
-    //      if (MP1::CGameArchitectureSupport* as = g_mainMP1->GetArchSupport()) {
-    //        as->mouseDown(coord, button, mods);
-    //      }
-    //    }
-    //    m_imguiCallback.mouseDown(coord, button, mods);
-  }
-
-  void mouseUp(const boo::SWindowCoord& coord, EMouseButton button, boo::EModifierKey mods) override {
-    if (g_mainMP1) {
-      if (MP1::CGameArchitectureSupport* as = g_mainMP1->GetArchSupport()) {
-        as->mouseUp(coord, button, mods);
-      }
-    }
-    //    m_imguiCallback.mouseUp(coord, button, mods);
-  }
-
-  void mouseMove(const boo::SWindowCoord& coord) override {
-    //    if (!ImGuiWindowCallback::m_mouseCaptured && g_mainMP1) {
-    //      if (MP1::CGameArchitectureSupport* as = g_mainMP1->GetArchSupport()) {
-    //        as->mouseMove(coord);
-    //      }
-    //    }
-    //    m_imguiCallback.mouseMove(coord);
-  }
-
-  //  void mouseEnter(const boo::SWindowCoord& coord) override { m_imguiCallback.mouseEnter(coord); }
-
-  //  void mouseLeave(const boo::SWindowCoord& coord) override { m_imguiCallback.mouseLeave(coord); }
-
-  void scroll(const boo::SWindowCoord& coord, const boo::SScrollDelta& scroll) override {
-    //    if (!ImGuiWindowCallback::m_mouseCaptured && g_mainMP1) {
-    //      if (MP1::CGameArchitectureSupport* as = g_mainMP1->GetArchSupport()) {
-    //        as->scroll(coord, scroll);
-    //      }
-    //    }
-    //    m_imguiCallback.scroll(coord, scroll);
-  }
-
-  void charKeyDown(unsigned long charCode, boo::EModifierKey mods, bool isRepeat) override {
-    //    if (!ImGuiWindowCallback::m_keyboardCaptured && g_mainMP1) {
-    //      if (MP1::CGameArchitectureSupport* as = g_mainMP1->GetArchSupport()) {
-    //        as->charKeyDown(charCode, mods, isRepeat);
-    //      }
-    //    }
-    //    m_imguiCallback.charKeyDown(charCode, mods, isRepeat);
-  }
-
-  void charKeyUp(unsigned long charCode, boo::EModifierKey mods) override {
-    if (g_mainMP1) {
-      if (MP1::CGameArchitectureSupport* as = g_mainMP1->GetArchSupport()) {
-        as->charKeyUp(charCode, mods);
-      }
-    }
-    //    m_imguiCallback.charKeyUp(charCode, mods);
-  }
-
-  void specialKeyDown(aurora::SpecialKey key, boo::EModifierKey mods, bool isRepeat) override {
-    //    if (!ImGuiWindowCallback::m_keyboardCaptured && g_mainMP1) {
-    //      if (MP1::CGameArchitectureSupport* as = g_mainMP1->GetArchSupport()) {
-    //        as->specialKeyDown(key, mods, isRepeat);
-    //      }
-    //    }
-    //    if (True(mods & boo::EModifierKey::Alt)) {
-    //      if (key == aurora::SpecialKey::Enter) {
-    //        m_fullscreenToggleRequested = true;
-    //      } else if (key == aurora::SpecialKey::F4) {
-    //        m_windowInvalid = true;
-    //      }
-    //    }
-    //    m_imguiCallback.specialKeyDown(key, mods, isRepeat);
-  }
-
-  void specialKeyUp(aurora::SpecialKey key, boo::EModifierKey mods) override {
-    //    if (g_mainMP1) {
-    //      if (MP1::CGameArchitectureSupport* as = g_mainMP1->GetArchSupport()) {
-    //        as->specialKeyUp(key, mods);
-    //      }
-    //    }
-    //    m_imguiCallback.specialKeyUp(key, mods);
-  }
-
-  void destroyed() override { m_windowInvalid = true; }
-};
-#endif
 
 struct Application : aurora::AppDelegate {
 private:
@@ -254,7 +153,6 @@ private:
   CVarManager& m_cvarManager;
   CVarCommons& m_cvarCommons;
   ImGuiConsole m_imGuiConsole;
-  std::string m_errorString;
 
   std::string m_deferredProject;
   bool m_projectInitialized = false;
@@ -267,7 +165,7 @@ private:
   bool m_fullscreenToggleRequested = false;
   bool m_quitRequested = false;
   using delta_clock = std::chrono::high_resolution_clock;
-  std::chrono::time_point<delta_clock> m_prevFrameTime;
+  delta_clock::time_point m_prevFrameTime;
 
   std::vector<u32> m_deferredControllers; // used to capture controllers added before CInputGenerator
                                           // is built, i.e during initialization
@@ -286,6 +184,9 @@ public:
     m_voiceEngine->setVolume(0.7f);
     m_amuseAllocWrapper.emplace(*m_voiceEngine);
 
+#if TARGET_OS_IOS || TARGET_OS_TV
+    m_deferredProject = std::string{m_fileMgr.getStoreRoot()} + "game.iso";
+#else
     for (const auto& str : aurora::get_args()) {
       auto arg = static_cast<std::string>(str);
       if (m_deferredProject.empty() && !arg.starts_with('-') && !arg.starts_with('+'))
@@ -293,6 +194,9 @@ public:
       else if (arg == "--no-sound")
         m_voiceEngine->setVolume(0.f);
     }
+#endif
+
+    m_voiceEngine->startPump();
   }
 
   void initialize() {
@@ -313,23 +217,15 @@ public:
     /* Ping the watchdog to let it know we're still alive */
     CInfiniteLoopDetector::UpdateWatchDog(std::chrono::system_clock::now());
 #endif
-    if (auto* input = g_InputGenerator) {
-      if (!m_deferredControllers.empty()) {
-        for (const auto which : m_deferredControllers) {
-          //input->controllerAdded(which);
-        }
-        m_deferredControllers.clear();
-      }
-    }
 
     if (!m_projectInitialized && !m_deferredProject.empty()) {
       if (CDvdFile::Initialize(m_deferredProject)) {
         m_projectInitialized = true;
       } else {
         Log.report(logvisor::Error, FMT_STRING("Failed to open disc image '{}'"), m_deferredProject);
-        m_errorString = fmt::format(FMT_STRING("Failed to open disc image '{}'"), m_deferredProject);
-        m_deferredProject.clear();
+        m_imGuiConsole.m_errorString = fmt::format(FMT_STRING("Failed to open disc image '{}'"), m_deferredProject);
       }
+      m_deferredProject.clear();
     }
 
     const auto targetFrameTime = getTargetFrameTime();
@@ -369,7 +265,14 @@ public:
 
     if (!g_mainMP1 && m_projectInitialized) {
       g_mainMP1.emplace(nullptr, nullptr);
-      g_mainMP1->Init(m_fileMgr, &m_cvarManager, m_voiceEngine.get(), *m_amuseAllocWrapper);
+      auto result = g_mainMP1->Init(m_fileMgr, &m_cvarManager, m_voiceEngine.get(), *m_amuseAllocWrapper);
+      if (!result.empty()) {
+        Log.report(logvisor::Error, FMT_STRING("{}"), result);
+        m_imGuiConsole.m_errorString = result;
+        g_mainMP1.reset();
+        CDvdFile::Shutdown();
+        m_projectInitialized = false;
+      }
     }
 
     float dt = 1 / 60.f;
@@ -377,20 +280,26 @@ public:
       dt = std::min(realDt, 1 / 30.f);
     }
 
+    m_imGuiConsole.PreUpdate();
     if (g_mainMP1) {
-      m_imGuiConsole.PreUpdate();
+      if (m_voiceEngine) {
+        m_voiceEngine->lockPump();
+      }
       if (g_mainMP1->Proc(dt)) {
         return false;
       }
-      m_imGuiConsole.PostUpdate();
-    } else {
-      auto result = m_imGuiConsole.ShowAboutWindow(false, m_errorString, true);
-      if (result) {
-        m_deferredProject = std::move(*result);
+      if (m_voiceEngine) {
+        m_voiceEngine->unlockPump();
       }
     }
+    m_imGuiConsole.PostUpdate();
+    if (!g_mainMP1 && m_imGuiConsole.m_gameDiscSelected) {
+      std::optional<std::string> result;
+      m_imGuiConsole.m_gameDiscSelected.swap(result);
+      m_deferredProject = std::move(*result);
+    }
 
-    if (m_quitRequested) {
+    if (m_quitRequested || m_imGuiConsole.m_quitRequested || m_cvarManager.restartRequired()) {
       if (g_mainMP1) {
         g_mainMP1->Quit();
       } else {
@@ -430,41 +339,27 @@ public:
 
   void onAppDisplayScaleChanged(float scale) noexcept override { ImGuiEngine_Initialize(scale); }
 
-  void onControllerButton(uint32_t idx, aurora::ControllerButton button, bool pressed) noexcept override {
-    if (auto* input = g_InputGenerator) {
-      //input->controllerButton(idx, button, pressed);
-    }
-  }
+  void onControllerButton(uint32_t idx, aurora::ControllerButton button, bool pressed) noexcept override {}
 
-  void onControllerAxis(uint32_t idx, aurora::ControllerAxis axis, int16_t value) noexcept override {
-    if (auto* input = g_InputGenerator) {
-      //input->controllerAxis(idx, axis, value);
-    }
-  }
+  void onControllerAxis(uint32_t idx, aurora::ControllerAxis axis, int16_t value) noexcept override {}
 
-  void onControllerAdded(uint32_t which) noexcept override {
-    if (auto* input = g_InputGenerator) {
-      //input->controllerAdded(which);
-    } else {
-      m_deferredControllers.emplace_back(which);
-    }
-  }
+  void onControllerAdded(uint32_t which) noexcept override { m_imGuiConsole.ControllerAdded(which); }
 
-  void onControllerRemoved(uint32_t which) noexcept override {
-    if (auto* input = g_InputGenerator) {
-      //input->controllerRemoved(which);
-    }
-  }
+  void onControllerRemoved(uint32_t which) noexcept override { m_imGuiConsole.ControllerRemoved(which); }
 
   void onAppExiting() noexcept override {
     m_imGuiConsole.Shutdown();
+    if (m_voiceEngine) {
+      m_voiceEngine->unlockPump();
+      m_voiceEngine->stopPump();
+    }
     if (g_mainMP1) {
       g_mainMP1->Shutdown();
     }
     g_mainMP1.reset();
     m_cvarManager.serialize();
-    m_voiceEngine.reset();
     m_amuseAllocWrapper.reset();
+    m_voiceEngine.reset();
     CDvdFile::Shutdown();
   }
 
@@ -600,7 +495,12 @@ public:
 
 } // namespace metaforce
 
-static void SetupBasics(bool logging) {
+static void SetupBasics() {
+#if _WIN32
+  if (logging && GetFileType(GetStdHandle(STD_ERROR_HANDLE)) == FILE_TYPE_UNKNOWN)
+    logvisor::CreateWin32Console();
+#endif
+
   auto result = zeus::validateCPU();
   if (!result.first) {
 #if _WIN32 && !WINDOWS_STORE
@@ -614,10 +514,6 @@ static void SetupBasics(bool logging) {
 #endif
     exit(1);
   }
-
-  logvisor::RegisterStandardExceptions();
-  if (logging)
-    logvisor::RegisterConsoleLogger();
 
 #if SENTRY_ENABLED
   FileStoreManager fileMgr{"sentry-native-metaforce"};
@@ -646,61 +542,49 @@ int main(int argc, char** argv) {
     return 100;
   }
 
-  SetupBasics(IsClientLoggingEnabled(argc, argv));
+  SetupBasics();
   metaforce::FileStoreManager fileMgr{"AxioDL", "metaforce"};
-  metaforce::CVarManager cvarMgr{fileMgr};
-  metaforce::CVarCommons cvarCmns{cvarMgr};
 
   std::vector<std::string> args;
-  for (int i = 1; i < argc; ++i)
+  for (int i = 1; i < argc; ++i) {
     args.emplace_back(argv[i]);
-  cvarMgr.parseCommandLine(args);
-
-  std::string logFile = cvarCmns.getLogFile();
-  std::string logFilePath;
-  if (!logFile.empty()) {
-    std::time_t time = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-    char buf[100];
-    std::strftime(buf, 100, "%Y-%m-%d_%H-%M-%S", std::localtime(&time));
-    logFilePath = fmt::format(FMT_STRING("{}/{}-{}"), fileMgr.getStoreRoot(), buf, logFile);
-    logvisor::RegisterFileLogger(logFilePath.c_str());
   }
 
-  auto app = std::make_unique<metaforce::Application>(fileMgr, cvarMgr, cvarCmns);
-  auto icon = metaforce::GetIcon();
-  auto data = aurora::Icon{
-      .data = std::move(icon.data),
-      .width = icon.width,
-      .height = icon.height,
-  };
-  aurora::app_run(std::move(app), std::move(data), argc, argv);
+  bool restart = false;
+  do {
+    metaforce::CVarManager cvarMgr{fileMgr};
+    metaforce::CVarCommons cvarCmns{cvarMgr};
+    if (!restart) {
+      cvarMgr.parseCommandLine(args);
+
+      // TODO add clear loggers func to logvisor so we can recreate loggers on restart
+      logvisor::RegisterStandardExceptions();
+      if (IsClientLoggingEnabled(argc, argv)) {
+        logvisor::RegisterConsoleLogger();
+      }
+
+      std::string logFile = cvarCmns.getLogFile();
+      std::string logFilePath;
+      if (!logFile.empty()) {
+        std::time_t time = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+        char buf[100];
+        std::strftime(buf, 100, "%Y-%m-%d_%H-%M-%S", std::localtime(&time));
+        logFilePath = fmt::format(FMT_STRING("{}/{}-{}"), fileMgr.getStoreRoot(), buf, logFile);
+        logvisor::RegisterFileLogger(logFilePath.c_str());
+      }
+    }
+    auto app = std::make_unique<metaforce::Application>(fileMgr, cvarMgr, cvarCmns);
+    auto icon = metaforce::GetIcon();
+    auto data = aurora::Icon{
+        .data = std::move(icon.data),
+        .width = icon.width,
+        .height = icon.height,
+    };
+    aurora::app_run(std::move(app), std::move(data), argc, argv, fileMgr.getStoreRoot(),
+                    aurora::backend_from_string(cvarCmns.getGraphicsApi()), cvarCmns.getSamples(),
+                    cvarCmns.getAnisotropy(), cvarCmns.getFullscreen());
+    restart = cvarMgr.restartRequired();
+  } while (restart);
   return 0;
-}
-#endif
-
-#if WINDOWS_STORE
-#include "boo/UWPViewProvider.hpp"
-using namespace Windows::ApplicationModel::Core;
-
-[Platform::MTAThread] int WINAPIV main(Platform::Array<Platform::String ^> ^ params) {
-  SetupBasics(false);
-  metaforce::Application appCb;
-  auto viewProvider = ref new boo::ViewProvider(appCb, "metaforce", "Metaforce", "metaforce", params, false);
-  CoreApplication::Run(viewProvider);
-  return 0;
-}
-
-#elif _WIN32
-#include <shellapi.h>
-#include <nowide/args.hpp>
-
-int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int) {
-  int argc = 0;
-  char** argv = nullptr;
-  nowide::args _(argc, argv);
-  const DWORD outType = GetFileType(GetStdHandle(STD_ERROR_HANDLE));
-  if (IsClientLoggingEnabled(argc, argv) && outType == FILE_TYPE_UNKNOWN)
-    logvisor::CreateWin32Console();
-  return main(argc, argv);
 }
 #endif

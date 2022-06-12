@@ -8,9 +8,13 @@
 #include <absl/container/flat_hash_map.h>
 #include <condition_variable>
 #include <deque>
+#include <fstream>
 #include <logvisor/logvisor.hpp>
 #include <thread>
-#include <fstream>
+
+namespace aurora {
+extern std::string g_configPath;
+} // namespace aurora
 
 namespace aurora::gfx {
 static logvisor::Module Log("aurora::gfx");
@@ -22,12 +26,14 @@ using gpu::g_queue;
 std::vector<std::string> g_debugGroupStack;
 #endif
 
-constexpr uint64_t UniformBufferSize = 3145728; // 3mb
-constexpr uint64_t VertexBufferSize = 3145728;  // 3mb
-constexpr uint64_t IndexBufferSize = 1048576;   // 1mb
-constexpr uint64_t StorageBufferSize = 8388608; // 8mb
+constexpr uint64_t UniformBufferSize = 3145728;  // 3mb
+constexpr uint64_t VertexBufferSize = 3145728;   // 3mb
+constexpr uint64_t IndexBufferSize = 1048576;    // 1mb
+constexpr uint64_t StorageBufferSize = 8388608;  // 8mb
+constexpr uint64_t TextureUploadSize = 25165824; // 24mb
 
-constexpr uint64_t StagingBufferSize = UniformBufferSize + VertexBufferSize + IndexBufferSize + StorageBufferSize;
+constexpr uint64_t StagingBufferSize =
+    UniformBufferSize + VertexBufferSize + IndexBufferSize + StorageBufferSize + TextureUploadSize;
 
 struct ShaderState {
   movie_player::State moviePlayer;
@@ -112,6 +118,7 @@ static ByteBuffer g_uniforms;
 static ByteBuffer g_indices;
 static ByteBuffer g_storage;
 static ByteBuffer g_staticStorage;
+static ByteBuffer g_textureUpload;
 wgpu::Buffer g_vertexBuffer;
 wgpu::Buffer g_uniformBuffer;
 wgpu::Buffer g_indexBuffer;
@@ -123,7 +130,18 @@ static wgpu::SupportedLimits g_cachedLimits;
 static ShaderState g_state;
 static PipelineRef g_currentPipeline;
 
-static std::vector<Command> g_commands;
+using CommandList = std::vector<Command>;
+struct RenderPass {
+  u32 resolveTarget = UINT32_MAX;
+  ClipRect resolveRect;
+  zeus::CColor clearColor{0.f, 0.f};
+  CommandList commands;
+  bool clear = true;
+};
+static std::vector<RenderPass> g_renderPasses;
+static u32 g_currentRenderPass;
+std::vector<TextureHandle> g_resolvedTextures;
+std::vector<TextureUpload> g_textureUploads;
 
 static ByteBuffer g_serializedPipelines{};
 static u32 g_serializedPipelineCount = 0;
@@ -175,27 +193,23 @@ static PipelineRef find_pipeline(ShaderType type, const PipelineConfig& config, 
   return hash;
 }
 
-static void push_draw_command(ShaderDrawCommand data) {
-  g_commands.push_back({
-      .type = CommandType::Draw,
+static inline void push_command(CommandType type, const Command::Data& data) {
+  g_renderPasses[g_currentRenderPass].commands.push_back({
+      .type = type,
 #ifdef AURORA_GFX_DEBUG_GROUPS
       .debugGroupStack = g_debugGroupStack,
 #endif
-      .data = {.draw = data},
+      .data = data,
   });
 }
+
+static void push_draw_command(ShaderDrawCommand data) { push_command(CommandType::Draw, Command::Data{.draw = data}); }
 
 static Command::Data::SetViewportCommand g_cachedViewport;
 void set_viewport(float left, float top, float width, float height, float znear, float zfar) noexcept {
   Command::Data::SetViewportCommand cmd{left, top, width, height, znear, zfar};
   if (cmd != g_cachedViewport) {
-    g_commands.push_back({
-        .type = CommandType::SetViewport,
-#ifdef AURORA_GFX_DEBUG_GROUPS
-        .debugGroupStack = g_debugGroupStack,
-#endif
-        .data = {.setViewport = cmd},
-    });
+    push_command(CommandType::SetViewport, Command::Data{.setViewport = cmd});
     g_cachedViewport = cmd;
   }
 }
@@ -203,21 +217,35 @@ static Command::Data::SetScissorCommand g_cachedScissor;
 void set_scissor(uint32_t x, uint32_t y, uint32_t w, uint32_t h) noexcept {
   Command::Data::SetScissorCommand cmd{x, y, w, h};
   if (cmd != g_cachedScissor) {
-    g_commands.push_back({
-        .type = CommandType::SetScissor,
-#ifdef AURORA_GFX_DEBUG_GROUPS
-        .debugGroupStack = g_debugGroupStack,
-#endif
-        .data = {.setScissor = cmd},
-    });
+    push_command(CommandType::SetScissor, Command::Data{.setScissor = cmd});
     g_cachedScissor = cmd;
   }
 }
 
-void resolve_color(const ClipRect& rect, uint32_t bind, bool clear_depth) noexcept {
-  // TODO
+bool operator==(const wgpu::Extent3D& lhs, const wgpu::Extent3D& rhs) {
+  return lhs.width == rhs.width && lhs.height == rhs.height && lhs.depthOrArrayLayers == rhs.depthOrArrayLayers;
 }
-void resolve_depth(const ClipRect& rect, uint32_t bind) noexcept {
+
+void resolve_color(const ClipRect& rect, uint32_t bind, GX::TextureFormat fmt, bool clear_depth) noexcept {
+  if (g_resolvedTextures.size() < bind + 1) {
+    g_resolvedTextures.resize(bind + 1);
+  }
+  const wgpu::Extent3D size{
+      .width = static_cast<uint32_t>(rect.width),
+      .height = static_cast<uint32_t>(rect.height),
+  };
+  if (!g_resolvedTextures[bind] || g_resolvedTextures[bind]->size != size) {
+    g_resolvedTextures[bind] = new_render_texture(rect.width, rect.height, fmt, "Resolved Texture");
+  }
+  auto& currentPass = g_renderPasses[g_currentRenderPass];
+  currentPass.resolveTarget = bind;
+  currentPass.resolveRect = rect;
+  auto& newPass = g_renderPasses.emplace_back();
+  newPass.clearColor = gx::g_gxState.clearColor;
+  newPass.clear = false; // TODO
+  ++g_currentRenderPass;
+}
+void resolve_depth(const ClipRect& rect, uint32_t bind, GX::TextureFormat fmt) noexcept {
   // TODO
 }
 
@@ -237,7 +265,7 @@ const stream::State& get_state() {
 }
 template <>
 void push_draw_command(stream::DrawData data) {
-  push_draw_command({.type = ShaderType::Stream, .stream = data});
+  push_draw_command(ShaderDrawCommand{.type = ShaderType::Stream, .stream = data});
 }
 template <>
 PipelineRef pipeline_ref(stream::PipelineConfig config) {
@@ -246,7 +274,7 @@ PipelineRef pipeline_ref(stream::PipelineConfig config) {
 
 template <>
 void push_draw_command(model::DrawData data) {
-  push_draw_command({.type = ShaderType::Model, .model = data});
+  push_draw_command(ShaderDrawCommand{.type = ShaderType::Model, .model = data});
 }
 template <>
 PipelineRef pipeline_ref(model::PipelineConfig config) {
@@ -285,7 +313,10 @@ static void pipeline_worker() {
 
 void initialize() {
   // No async pipelines for OpenGL (ES)
-  if (gpu::g_backendType != wgpu::BackendType::OpenGL && gpu::g_backendType != wgpu::BackendType::OpenGLES) {
+  if (gpu::g_backendType == wgpu::BackendType::OpenGL || gpu::g_backendType == wgpu::BackendType::OpenGLES) {
+    g_hasPipelineThread = false;
+  } else {
+    g_pipelineThreadEnd = false;
     g_pipelineThread = std::thread(pipeline_worker);
     g_hasPipelineThread = true;
   }
@@ -322,14 +353,17 @@ void initialize() {
 
   {
     // Load serialized pipeline cache
-    std::ifstream file("pipeline_cache.bin", std::ios::in | std::ios::binary | std::ios::ate);
-    const size_t size = file.tellg();
-    file.seekg(0, std::ios::beg);
-    constexpr size_t headerSize = sizeof(g_serializedPipelineCount);
-    if (size != -1 && size > headerSize) {
-      g_serializedPipelines.append_zeroes(size - headerSize);
-      file.read(reinterpret_cast<char*>(&g_serializedPipelineCount), headerSize);
-      file.read(reinterpret_cast<char*>(g_serializedPipelines.data()), size - headerSize);
+    std::string path = g_configPath + "pipeline_cache.bin";
+    std::ifstream file(path, std::ios::in | std::ios::binary | std::ios::ate);
+    if (file) {
+      const size_t size = file.tellg();
+      file.seekg(0, std::ios::beg);
+      constexpr size_t headerSize = sizeof(g_serializedPipelineCount);
+      if (size != -1 && size > headerSize) {
+        g_serializedPipelines.append_zeroes(size - headerSize);
+        file.read(reinterpret_cast<char*>(&g_serializedPipelineCount), headerSize);
+        file.read(reinterpret_cast<char*>(g_serializedPipelines.data()), size - headerSize);
+      }
     }
   }
   if (g_serializedPipelineCount > 0) {
@@ -389,23 +423,35 @@ void shutdown() {
 
   {
     // Write serialized pipelines to file
-    std::ofstream file("pipeline_cache.bin", std::ios::out | std::ios::trunc | std::ios::binary);
-    file.write(reinterpret_cast<const char*>(&g_serializedPipelineCount), sizeof(g_serializedPipelineCount));
-    file.write(reinterpret_cast<const char*>(g_serializedPipelines.data()), g_serializedPipelines.size());
+    std::ofstream file(g_configPath + "pipeline_cache.bin", std::ios::out | std::ios::trunc | std::ios::binary);
+    if (file) {
+      file.write(reinterpret_cast<const char*>(&g_serializedPipelineCount), sizeof(g_serializedPipelineCount));
+      file.write(reinterpret_cast<const char*>(g_serializedPipelines.data()), g_serializedPipelines.size());
+    }
+    g_serializedPipelines.clear();
+    g_serializedPipelineCount = 0;
   }
 
   gx::shutdown();
 
+  g_resolvedTextures.clear();
+  g_textureUploads.clear();
   g_cachedBindGroups.clear();
   g_cachedSamplers.clear();
   g_pipelines.clear();
+  g_queuedPipelines.clear();
   g_vertexBuffer = {};
   g_uniformBuffer = {};
   g_indexBuffer = {};
   g_storageBuffer = {};
   g_stagingBuffers.fill({});
+  g_renderPasses.clear();
+  g_currentRenderPass = 0;
 
   g_state = {};
+
+  queuedPipelines = 0;
+  createdPipelines = 0;
 }
 
 static size_t currentStagingBuffer = 0;
@@ -440,6 +486,10 @@ void begin_frame() {
   mapBuffer(g_uniforms, UniformBufferSize);
   mapBuffer(g_indices, IndexBufferSize);
   mapBuffer(g_storage, StorageBufferSize);
+  mapBuffer(g_textureUpload, TextureUploadSize);
+
+  g_renderPasses.emplace_back();
+  g_currentRenderPass = 0;
 }
 
 // for imgui debug
@@ -464,17 +514,101 @@ void end_frame(const wgpu::CommandEncoder& cmd) {
   g_lastUniformSize = writeBuffer(g_uniforms, g_uniformBuffer, UniformBufferSize, "Uniform");
   g_lastIndexSize = writeBuffer(g_indices, g_indexBuffer, IndexBufferSize, "Index");
   g_lastStorageSize = writeBuffer(g_storage, g_storageBuffer, StorageBufferSize, "Storage");
+  {
+    // Perform texture copies
+    for (const auto& item : g_textureUploads) {
+      const wgpu::ImageCopyBuffer buf{
+          .layout =
+              wgpu::TextureDataLayout{
+                  .offset = item.layout.offset + bufferOffset,
+                  .bytesPerRow = ALIGN(item.layout.bytesPerRow, 256),
+                  .rowsPerImage = item.layout.rowsPerImage,
+              },
+          .buffer = g_stagingBuffers[currentStagingBuffer],
+      };
+      cmd.CopyBufferToTexture(&buf, &item.tex, &item.size);
+    }
+    g_textureUploads.clear();
+    g_textureUpload.clear();
+  }
   currentStagingBuffer = (currentStagingBuffer + 1) % g_stagingBuffers.size();
   map_staging_buffer();
 }
 
-void render(const wgpu::RenderPassEncoder& pass) {
+void render(wgpu::CommandEncoder& cmd) {
+  for (u32 i = 0; i < g_renderPasses.size(); ++i) {
+    const auto& passInfo = g_renderPasses[i];
+    bool finalPass = i == g_renderPasses.size() - 1;
+    if (finalPass && passInfo.resolveTarget != UINT32_MAX) {
+      Log.report(logvisor::Fatal, FMT_STRING("Final render pass must not have resolve target"));
+      unreachable();
+    }
+    const std::array attachments{
+        wgpu::RenderPassColorAttachment{
+            .view = gpu::g_frameBuffer.view,
+            .resolveTarget = gpu::g_graphicsConfig.msaaSamples > 1 ? gpu::g_frameBufferResolved.view : nullptr,
+            .loadOp = passInfo.clear ? wgpu::LoadOp::Clear : wgpu::LoadOp::Load,
+            .storeOp = wgpu::StoreOp::Store,
+            .clearValue =
+                {
+                    .r = passInfo.clearColor.r(),
+                    .g = passInfo.clearColor.g(),
+                    .b = passInfo.clearColor.b(),
+                    .a = passInfo.clearColor.a(),
+                },
+        },
+    };
+    const wgpu::RenderPassDepthStencilAttachment depthStencilAttachment{
+        .view = gpu::g_depthBuffer.view,
+        .depthLoadOp = wgpu::LoadOp::Clear,
+        .depthStoreOp = wgpu::StoreOp::Discard,
+        .depthClearValue = 1.f,
+    };
+    const auto label = fmt::format(FMT_STRING("Render pass {}"), i);
+    const wgpu::RenderPassDescriptor renderPassDescriptor{
+        .label = label.c_str(),
+        .colorAttachmentCount = attachments.size(),
+        .colorAttachments = attachments.data(),
+        .depthStencilAttachment = &depthStencilAttachment,
+    };
+    auto pass = cmd.BeginRenderPass(&renderPassDescriptor);
+    render_pass(pass, i);
+    pass.End();
+
+    if (passInfo.resolveTarget != UINT32_MAX) {
+      wgpu::ImageCopyTexture src{
+          .origin =
+              wgpu::Origin3D{
+                  .x = static_cast<uint32_t>(passInfo.resolveRect.x),
+                  .y = static_cast<uint32_t>(passInfo.resolveRect.y),
+              },
+      };
+      if (gpu::g_graphicsConfig.msaaSamples > 1) {
+        src.texture = gpu::g_frameBufferResolved.texture;
+      } else {
+        src.texture = gpu::g_frameBuffer.texture;
+      }
+      auto& target = g_resolvedTextures[passInfo.resolveTarget];
+      const wgpu::ImageCopyTexture dst{
+          .texture = target->texture,
+      };
+      const wgpu::Extent3D size{
+          .width = static_cast<uint32_t>(passInfo.resolveRect.width),
+          .height = static_cast<uint32_t>(passInfo.resolveRect.height),
+      };
+      cmd.CopyTextureToTexture(&src, &dst, &size);
+    }
+  }
+  g_renderPasses.clear();
+}
+
+void render_pass(const wgpu::RenderPassEncoder& pass, u32 idx) {
   g_currentPipeline = UINT64_MAX;
 #ifdef AURORA_GFX_DEBUG_GROUPS
   std::vector<std::string> lastDebugGroupStack;
 #endif
 
-  for (const auto& cmd : g_commands) {
+  for (const auto& cmd : g_renderPasses[idx].commands) {
 #ifdef AURORA_GFX_DEBUG_GROUPS
     {
       size_t firstDiff = lastDebugGroupStack.size();
@@ -524,8 +658,6 @@ void render(const wgpu::RenderPassEncoder& pass) {
     pass.PopDebugGroup();
   }
 #endif
-
-  g_commands.clear();
 }
 
 bool bind_pipeline(PipelineRef ref, const wgpu::RenderPassEncoder& pass) {
@@ -584,6 +716,18 @@ Range push_static_storage(const uint8_t* data, size_t length) {
   range.isStatic = true;
   return range;
 }
+Range push_texture_data(const uint8_t* data, size_t length, u32 bytesPerRow, u32 rowsPerImage) {
+  // For CopyBufferToTexture, we need an alignment of 256 per row (see Dawn kTextureBytesPerRowAlignment)
+  const auto copyBytesPerRow = ALIGN(bytesPerRow, 256);
+  const auto range = map(g_textureUpload, copyBytesPerRow * rowsPerImage, 0);
+  u8* dst = g_textureUpload.data() + range.offset;
+  for (u32 i = 0; i < rowsPerImage; ++i) {
+    memcpy(dst, data, bytesPerRow);
+    data += bytesPerRow;
+    dst += copyBytesPerRow;
+  }
+  return range;
+}
 std::pair<ByteBuffer, Range> map_verts(size_t length) {
   const auto range = map(g_verts, length, 4);
   return {ByteBuffer{g_verts.data() + range.offset, range.size}, range};
@@ -626,10 +770,7 @@ const wgpu::Sampler& sampler_ref(const wgpu::SamplerDescriptor& descriptor) {
   return it->second;
 }
 
-uint32_t align_uniform(uint32_t value) {
-  const auto uniform_alignment = g_cachedLimits.limits.minUniformBufferOffsetAlignment;
-  return ALIGN(value, uniform_alignment);
-}
+uint32_t align_uniform(uint32_t value) { return ALIGN(value, g_cachedLimits.limits.minUniformBufferOffsetAlignment); }
 
 void push_debug_group(zstring_view label) noexcept {
 #ifdef AURORA_GFX_DEBUG_GROUPS

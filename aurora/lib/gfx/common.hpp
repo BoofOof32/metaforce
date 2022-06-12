@@ -125,23 +125,37 @@ extern wgpu::Buffer g_uniformBuffer;
 extern wgpu::Buffer g_indexBuffer;
 extern wgpu::Buffer g_storageBuffer;
 extern size_t g_staticStorageLastSize;
+struct TextureUpload {
+  wgpu::TextureDataLayout layout;
+  wgpu::ImageCopyTexture tex;
+  wgpu::Extent3D size;
 
+  TextureUpload(wgpu::TextureDataLayout layout, wgpu::ImageCopyTexture tex, wgpu::Extent3D size) noexcept
+  : layout(std::move(layout)), tex(std::move(tex)), size(std::move(size)) {}
+};
+extern std::vector<TextureUpload> g_textureUploads;
+// TODO this is a bad place for this...
+extern std::vector<TextureHandle> g_resolvedTextures;
+
+constexpr GX::TextureFormat InvalidTextureFormat = static_cast<GX::TextureFormat>(-1);
 struct TextureRef {
   wgpu::Texture texture;
   wgpu::TextureView view;
   wgpu::Extent3D size;
   wgpu::TextureFormat format;
   uint32_t mipCount;
-  metaforce::ETexelFormat gameFormat;
+  GX::TextureFormat gxFormat;
+  bool isRenderTexture; // :shrug: for now
 
   TextureRef(wgpu::Texture&& texture, wgpu::TextureView&& view, wgpu::Extent3D size, wgpu::TextureFormat format,
-             uint32_t mipCount, metaforce::ETexelFormat gameFormat = metaforce::ETexelFormat::Invalid)
+             uint32_t mipCount, GX::TextureFormat gxFormat, bool isRenderTexture)
   : texture(std::move(texture))
   , view(std::move(view))
   , size(size)
   , format(format)
   , mipCount(mipCount)
-  , gameFormat(gameFormat) {}
+  , gxFormat(gxFormat)
+  , isRenderTexture(isRenderTexture) {}
 };
 
 using BindGroupRef = uint64_t;
@@ -168,7 +182,8 @@ void shutdown();
 
 void begin_frame();
 void end_frame(const wgpu::CommandEncoder& cmd);
-void render(const wgpu::RenderPassEncoder& pass);
+void render(wgpu::CommandEncoder& cmd);
+void render_pass(const wgpu::RenderPassEncoder& pass, u32 idx);
 void map_staging_buffer();
 
 Range push_verts(const uint8_t* data, size_t length);
@@ -204,6 +219,7 @@ template <typename T>
 static inline Range push_static_storage(const T& data) {
   return push_static_storage(reinterpret_cast<const uint8_t*>(&data), sizeof(T));
 }
+Range push_texture_data(const uint8_t* data, size_t length, u32 bytesPerRow, u32 rowsPerImage);
 std::pair<ByteBuffer, Range> map_verts(size_t length);
 std::pair<ByteBuffer, Range> map_indices(size_t length);
 std::pair<ByteBuffer, Range> map_uniform(size_t length);

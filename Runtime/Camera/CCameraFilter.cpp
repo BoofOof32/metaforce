@@ -4,10 +4,6 @@
 #include "Runtime/GameGlobalObjects.hpp"
 #include "Runtime/Graphics/CCubeRenderer.hpp"
 #include "Runtime/Graphics/CGraphics.hpp"
-#include "Runtime/Graphics/Shaders/CColoredQuadFilter.hpp"
-#include "Runtime/Graphics/Shaders/CRandomStaticFilter.hpp"
-#include "Runtime/Graphics/Shaders/CScanLinesFilter.hpp"
-#include "Runtime/Graphics/Shaders/CTexturedQuadFilter.hpp"
 #include "Runtime/Graphics/CGX.hpp"
 
 #include <algorithm>
@@ -252,17 +248,18 @@ void CCameraBlurPass::Draw(bool clearDepth) {
   if (x10_curType == EBlurType::NoBlur)
     return;
 
-  if (x10_curType == EBlurType::Xray) {
-    if (!m_xrayShader)
-      m_xrayShader.emplace(x0_paletteTex);
-    m_xrayShader->draw(x1c_curValue);
-  } else {
-    if (!m_shader)
-      m_shader.emplace();
-    m_shader->draw(x1c_curValue, clearDepth);
-    if (clearDepth)
-      CGraphics::SetDepthRange(DEPTH_NEAR, DEPTH_FAR);
-  }
+  // TODO
+  //  if (x10_curType == EBlurType::Xray) {
+  //    if (!m_xrayShader)
+  //      m_xrayShader.emplace(x0_paletteTex);
+  //    m_xrayShader->draw(x1c_curValue);
+  //  } else {
+  //    if (!m_shader)
+  //      m_shader.emplace();
+  //    m_shader->draw(x1c_curValue, clearDepth);
+  //    if (clearDepth)
+  //      CGraphics::SetDepthRange(DEPTH_NEAR, DEPTH_FAR);
+  //  }
 }
 
 void CCameraBlurPass::Update(float dt) {
@@ -277,7 +274,8 @@ void CCameraBlurPass::Update(float dt) {
   }
 }
 
-void CCameraBlurPass::SetBlur(EBlurType type, float amount, float duration) {
+void CCameraBlurPass::SetBlur(EBlurType type, float amount, float duration, bool usePersistentFb) {
+  // TODO impl usePersistentFb
   if (duration == 0.f) {
     x24_totalTime = 0.f;
     x28_remainingTime = 0.f;
@@ -292,9 +290,9 @@ void CCameraBlurPass::SetBlur(EBlurType type, float amount, float duration) {
 
     x14_endType = type;
     x10_curType = type;
-    // x2c_usePersistent = b1;
+    x2c_usePersistent = usePersistentFb;
   } else {
-    // x2c_usePersistent = b1;
+    x2c_usePersistent = usePersistentFb;
     x24_totalTime = duration;
     x28_remainingTime = duration;
     x18_endValue = x1c_curValue;
@@ -311,6 +309,6 @@ void CCameraBlurPass::SetBlur(EBlurType type, float amount, float duration) {
   }
 }
 
-void CCameraBlurPass::DisableBlur(float duration) { SetBlur(EBlurType::NoBlur, 0.f, duration); }
+void CCameraBlurPass::DisableBlur(float duration) { SetBlur(EBlurType::NoBlur, 0.f, duration, x2c_usePersistent); }
 
 } // namespace metaforce

@@ -124,7 +124,7 @@ float CPlayerGun::CMotionState::gGunExtendDistance = 0.125f;
 float CPlayerGun::skTractorBeamFactor = 0.5f / CPlayerState::GetMissileComboChargeFactor();
 
 CPlayerGun::CPlayerGun(TUniqueId playerId)
-: x0_lights(8, zeus::CVector3f{-30.f, 0.f, 30.f}, 4, 4, false, false, false, 0.1f)
+: x0_lights(8, zeus::skZero3f, 4, 4, false, false, false, 0.1f)
 , x538_playerId(playerId)
 , x550_camBob(CPlayerCameraBob::ECameraBobType::One, CPlayerCameraBob::GetCameraBobExtent(),
               CPlayerCameraBob::GetCameraBobPeriod())
@@ -175,8 +175,6 @@ CPlayerGun::CPlayerGun(TUniqueId playerId)
   x550_camBob.SetPlayerVelocity(zeus::skZero3f);
   x550_camBob.SetBobMagnitude(0.f);
   x550_camBob.SetBobTimeScale(0.f);
-
-  m_aaboxShader.setAABB(x6c8_hologramClipCube);
 }
 
 void CPlayerGun::InitBeamData() {
@@ -2133,20 +2131,24 @@ zeus::CVector3f CPlayerGun::ConvertToScreenSpace(const zeus::CVector3f& pos, con
 
 void CPlayerGun::CopyScreenTex() {
   // Copy lower right quadrant to gpCopyTexBuf as RGBA8
-  CGraphics::ResolveSpareTexture(CGraphics::g_Viewport);
+  // TODO CGraphics::ResolveSpareTexture(CGraphics::g_Viewport);
 }
 
 void CPlayerGun::DrawScreenTex(float z) {
   // Use CopyScreenTex rendering to draw over framebuffer pixels in front of `z`
   // This is accomplished using orthographic projection quad with sweeping `y` coordinates
   // Depth is set to GEQUAL to obscure pixels in front rather than behind
-//  m_screenQuad.draw(zeus::skWhite, 1.f, CTexturedQuadFilter::DefaultRect, z);
+
+  // TODO
+  // m_screenQuad.draw(zeus::skWhite, 1.f, CTexturedQuadFilter::DefaultRect, z);
 }
 
 void CPlayerGun::DrawClipCube(const zeus::CAABox& aabb) {
   // Render AABB as completely transparent object, only modifying Z-buffer
   // AABB has already been set in constructor (since it's constant)
-  m_aaboxShader.draw(zeus::skClear);
+
+  // TODO
+  // m_aaboxShader.draw(zeus::skClear);
 }
 
 void CPlayerGun::Render(const CStateManager& mgr, const zeus::CVector3f& pos, const CModelFlags& flags) {

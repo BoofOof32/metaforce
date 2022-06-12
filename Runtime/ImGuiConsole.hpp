@@ -14,6 +14,10 @@
 
 #include <zeus/CEulerAngles.hpp>
 
+#if __APPLE__
+#include <TargetConditionals.h>
+#endif
+
 namespace metaforce {
 void ImGuiStringViewText(std::string_view text);
 void ImGuiTextCenter(std::string_view text);
@@ -34,21 +38,33 @@ struct ImGuiEntityEntry {
   [[nodiscard]] CActor* AsActor() const { return isActor ? static_cast<CActor*>(ent) : nullptr; }
 };
 
+struct Toast {
+  std::string message;
+  float remain;
+  float current = 0.f;
+  Toast(std::string message, float duration) noexcept : message(std::move(message)), remain(duration) {}
+};
+
 class ImGuiConsole {
 public:
   static std::set<TUniqueId> inspectingEntities;
   static std::array<ImGuiEntityEntry, kMaxEntities> entities;
   static ImGuiPlayerLoadouts loadouts;
 
-  ImGuiConsole(CVarManager& cvarMgr, CVarCommons& cvarCommons) : m_cvarMgr(cvarMgr), m_cvarCommons(cvarCommons) {}
+  ImGuiConsole(CVarManager& cvarMgr, CVarCommons& cvarCommons);
   void PreUpdate();
   void PostUpdate();
   void Shutdown();
-  std::optional<std::string> ShowAboutWindow(bool canClose, std::string_view errorString = ""sv,
-                                             bool preLaunch = false);
 
   static void BeginEntityRow(const ImGuiEntityEntry& entry);
   static void EndEntityRow(const ImGuiEntityEntry& entry);
+
+  void ControllerAdded(uint32_t idx);
+  void ControllerRemoved(uint32_t idx);
+
+  std::optional<std::string> m_errorString;
+  std::optional<std::string> m_gameDiscSelected;
+  bool m_quitRequested = false;
 
 private:
   CVarManager& m_cvarMgr;
@@ -61,6 +77,7 @@ private:
   bool m_showLayersWindow = false;
   bool m_showConsoleVariablesWindow = false;
   bool m_showPlayerTransformEditor = false;
+  bool m_showPreLaunchSettingsWindow = false;
   std::optional<zeus::CVector3f> m_savedLocation;
   std::optional<zeus::CEulerAngles> m_savedRotation;
 
@@ -77,7 +94,11 @@ private:
 
   // Debug overlays
   bool m_frameCounter = m_cvarCommons.m_debugOverlayShowFrameCounter->toBoolean();
+#if TARGET_OS_TV
+  bool m_frameRate = true;
+#else
   bool m_frameRate = m_cvarCommons.m_debugOverlayShowFramerate->toBoolean();
+#endif
   bool m_inGameTime = m_cvarCommons.m_debugOverlayShowInGameTime->toBoolean();
   bool m_roomTimer = m_cvarCommons.m_debugOverlayShowRoomTimer->toBoolean();
   bool m_playerInfo = m_cvarCommons.m_debugOverlayPlayerInfo->toBoolean();
@@ -87,24 +108,30 @@ private:
   bool m_randomStats = m_cvarCommons.m_debugOverlayShowRandomStats->toBoolean();
   bool m_resourceStats = m_cvarCommons.m_debugOverlayShowResourceStats->toBoolean();
   bool m_showInput = m_cvarCommons.m_debugOverlayShowInput->toBoolean();
+#if TARGET_OS_IOS
+  bool m_pipelineInfo = false;
+#else
   bool m_pipelineInfo = true; // TODO cvar
+#endif
   bool m_developer = m_cvarMgr.findCVar("developer")->toBoolean();
   bool m_cheats = m_cvarMgr.findCVar("cheats")->toBoolean();
   bool m_isInitialized = false;
+  bool m_isLaunchInitialized = false;
 
   int m_debugOverlayCorner = 2; // bottom-left
   int m_inputOverlayCorner = 3; // bottom-right
   const void* m_currentRoom = nullptr;
   double m_lastRoomTime = 0.f;
   double m_currentRoomStart = 0.f;
-  float m_menuHintTime = 5.f;
+  std::deque<Toast> m_toasts;
   std::string m_controllerName;
   u32 m_whichController = -1;
 
   bool m_controllerConfigVisible = false;
   ImGuiControllerConfig m_controllerConfig;
 
-  void ShowAppMainMenuBar(bool canInspect);
+  void ShowAboutWindow(bool preLaunch);
+  void ShowAppMainMenuBar(bool canInspect, bool preLaunch);
   void ShowMenuGame();
   bool ShowEntityInfoWindow(TUniqueId uid);
   void ShowInspectWindow(bool* isOpen);
@@ -114,11 +141,12 @@ private:
   void ShowItemsWindow();
   void ShowLayersWindow();
   void ShowConsoleVariablesWindow();
-  void ShowMenuHint();
+  void ShowToasts();
   void ShowInputViewer();
   void SetOverlayWindowLocation(int corner) const;
   void ShowCornerContextMenu(int& corner, int avoidCorner) const;
   void ShowPlayerTransformEditor();
   void ShowPipelineProgress();
+  void ShowPreLaunchSettingsWindow();
 };
 } // namespace metaforce

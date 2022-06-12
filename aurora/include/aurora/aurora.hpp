@@ -191,17 +191,17 @@ enum class MouseButton {
 ENABLE_BITWISE_ENUM(MouseButton);
 
 enum class Backend : uint8_t {
-  Invalid,
-  Vulkan,
-  Metal,
-  D3D12,
+  Null,
+  WebGPU,
   D3D11,
+  D3D12,
+  Metal,
+  Vulkan,
   OpenGL,
   OpenGLES,
-  WebGPU,
+  Invalid = 0xFF,
 };
 
-struct App;
 struct AppDelegate {
   AppDelegate() = default;
   virtual ~AppDelegate() noexcept = default;
@@ -242,13 +242,19 @@ struct AppDelegate {
   virtual void onControllerAxis(uint32_t which, ControllerAxis axis, int16_t value) noexcept = 0;
 };
 
-void app_run(std::unique_ptr<AppDelegate> app, Icon icon, int argc, char** argv) noexcept;
+void app_run(std::unique_ptr<AppDelegate> app, Icon icon, int argc, char** argv, std::string_view configPath,
+             Backend desiredBackend = Backend::Invalid, uint32_t msaa = 1, uint16_t aniso = 16,
+             bool fullscreen = false) noexcept;
 [[nodiscard]] std::vector<std::string> get_args() noexcept;
 [[nodiscard]] WindowSize get_window_size() noexcept;
 void set_window_title(zstring_view title) noexcept;
 [[nodiscard]] Backend get_backend() noexcept;
+[[nodiscard]] std::vector<Backend> get_available_backends() noexcept;
 [[nodiscard]] std::string_view get_backend_string() noexcept;
+[[nodiscard]] Backend backend_from_string(std::string_view name);
+[[nodiscard]] std::string_view backend_to_string(Backend backend);
 void set_fullscreen(bool fullscreen) noexcept;
+bool is_fullscreen() noexcept;
 [[nodiscard]] uint32_t get_which_controller_for_player(int32_t index) noexcept;
 [[nodiscard]] int32_t get_controller_player_index(uint32_t which) noexcept;
 void set_controller_player_index(uint32_t which, int32_t index) noexcept;

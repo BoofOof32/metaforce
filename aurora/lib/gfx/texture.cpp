@@ -22,6 +22,8 @@ static TextureFormatInfo format_info(wgpu::TextureFormat format) {
   switch (format) {
   case wgpu::TextureFormat::R8Unorm:
     return {1, 1, 1, false};
+  case wgpu::TextureFormat::R16Sint:
+    return {1, 1, 2, false};
   case wgpu::TextureFormat::RGBA8Unorm:
   case wgpu::TextureFormat::R32Float:
     return {1, 1, 4, false};
@@ -38,14 +40,14 @@ static wgpu::Extent3D physical_size(wgpu::Extent3D size, TextureFormatInfo info)
   return {width, height, size.depthOrArrayLayers};
 }
 
-TextureHandle new_static_texture_2d(uint32_t width, uint32_t height, uint32_t mips, metaforce::ETexelFormat format,
+TextureHandle new_static_texture_2d(uint32_t width, uint32_t height, uint32_t mips, GX::TextureFormat format,
                                     ArrayRef<uint8_t> data, zstring_view label) noexcept {
   auto handle = new_dynamic_texture_2d(width, height, mips, format, label);
-  const TextureRef& ref = *handle.ref;
+  const auto& ref = *handle;
 
   ByteBuffer buffer;
-  if (ref.gameFormat != metaforce::ETexelFormat::Invalid) {
-    buffer = convert_texture(ref.gameFormat, ref.size.width, ref.size.height, ref.mipCount, data);
+  if (ref.gxFormat != InvalidTextureFormat) {
+    buffer = convert_texture(ref.gxFormat, ref.size.width, ref.size.height, ref.mipCount, data);
     if (!buffer.empty()) {
       data = {buffer.data(), buffer.size()};
     }
@@ -69,25 +71,27 @@ TextureHandle new_static_texture_2d(uint32_t width, uint32_t height, uint32_t mi
                  offset + dataSize, data.size());
       unreachable();
     }
-    const auto dstView = wgpu::ImageCopyTexture{
+    auto dstView = wgpu::ImageCopyTexture{
         .texture = ref.texture,
         .mipLevel = mip,
     };
+    const auto range = push_texture_data(data.data() + offset, dataSize, bytesPerRow, heightBlocks);
     const auto dataLayout = wgpu::TextureDataLayout{
+        .offset = range.offset,
         .bytesPerRow = bytesPerRow,
         .rowsPerImage = heightBlocks,
     };
-    g_queue.WriteTexture(&dstView, data.data() + offset, dataSize, &dataLayout, &physicalSize);
+    g_textureUploads.emplace_back(dataLayout, std::move(dstView), physicalSize);
     offset += dataSize;
   }
-  if (offset < data.size()) {
+  if (data.size() != UINT32_MAX && offset < data.size()) {
     Log.report(logvisor::Warning, FMT_STRING("new_static_texture_2d[{}]: texture used {} bytes, but given {} bytes"),
                label, offset, data.size());
   }
   return handle;
 }
 
-TextureHandle new_dynamic_texture_2d(uint32_t width, uint32_t height, uint32_t mips, metaforce::ETexelFormat format,
+TextureHandle new_dynamic_texture_2d(uint32_t width, uint32_t height, uint32_t mips, GX::TextureFormat format,
                                      zstring_view label) noexcept {
   const auto wgpuFormat = to_wgpu(format);
   const auto size = wgpu::Extent3D{
@@ -110,21 +114,39 @@ TextureHandle new_dynamic_texture_2d(uint32_t width, uint32_t height, uint32_t m
   };
   auto texture = g_device.CreateTexture(&textureDescriptor);
   auto textureView = texture.CreateView(&textureViewDescriptor);
-  return {std::make_shared<TextureRef>(std::move(texture), std::move(textureView), size, wgpuFormat, mips, format)};
+  return std::make_shared<TextureRef>(std::move(texture), std::move(textureView), size, wgpuFormat, mips, format,
+                                      false);
 }
 
-TextureHandle new_render_texture(uint32_t width, uint32_t height, uint32_t color_bind_count, uint32_t depth_bind_count,
-                                 zstring_view label) noexcept {
-  return {}; // TODO
+TextureHandle new_render_texture(uint32_t width, uint32_t height, GX::TextureFormat fmt, zstring_view label) noexcept {
+  const auto wgpuFormat = gpu::g_graphicsConfig.colorFormat;
+  const auto size = wgpu::Extent3D{
+      .width = width,
+      .height = height,
+  };
+  const auto textureDescriptor = wgpu::TextureDescriptor{
+      .label = label.c_str(),
+      .usage = wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::CopyDst,
+      .size = size,
+      .format = wgpuFormat,
+      .mipLevelCount = 1,
+  };
+  const auto viewLabel = fmt::format(FMT_STRING("{} view"), label);
+  const auto textureViewDescriptor = wgpu::TextureViewDescriptor{
+      .label = viewLabel.c_str(),
+      .format = wgpuFormat,
+      .dimension = wgpu::TextureViewDimension::e2D,
+      .mipLevelCount = 1,
+  };
+  auto texture = g_device.CreateTexture(&textureDescriptor);
+  auto textureView = texture.CreateView(&textureViewDescriptor);
+  return std::make_shared<TextureRef>(std::move(texture), std::move(textureView), size, wgpuFormat, 1, fmt, true);
 }
 
-// TODO accept mip/layer parameters
-void write_texture(const TextureHandle& handle, ArrayRef<uint8_t> data) noexcept {
-  const TextureRef& ref = *handle.ref;
-
+void write_texture(const TextureRef& ref, ArrayRef<uint8_t> data) noexcept {
   ByteBuffer buffer;
-  if (ref.gameFormat != metaforce::ETexelFormat::Invalid) {
-    buffer = convert_texture(ref.gameFormat, ref.size.width, ref.size.height, ref.mipCount, data);
+  if (ref.gxFormat != InvalidTextureFormat) {
+    buffer = convert_texture(ref.gxFormat, ref.size.width, ref.size.height, ref.mipCount, data);
     if (!buffer.empty()) {
       data = {buffer.data(), buffer.size()};
     }
@@ -148,6 +170,17 @@ void write_texture(const TextureHandle& handle, ArrayRef<uint8_t> data) noexcept
                  data.size());
       unreachable();
     }
+//    auto dstView = wgpu::ImageCopyTexture{
+//        .texture = ref.texture,
+//        .mipLevel = mip,
+//    };
+//    const auto range = push_texture_data(data.data() + offset, dataSize, bytesPerRow, heightBlocks);
+//    const auto dataLayout = wgpu::TextureDataLayout{
+//        .offset = range.offset,
+//        .bytesPerRow = bytesPerRow,
+//        .rowsPerImage = heightBlocks,
+//    };
+//    g_textureUploads.emplace_back(dataLayout, std::move(dstView), physicalSize);
     const auto dstView = wgpu::ImageCopyTexture{
         .texture = ref.texture,
         .mipLevel = mip,
@@ -159,7 +192,7 @@ void write_texture(const TextureHandle& handle, ArrayRef<uint8_t> data) noexcept
     g_queue.WriteTexture(&dstView, data.data() + offset, dataSize, &dataLayout, &physicalSize);
     offset += dataSize;
   }
-  if (offset < data.size()) {
+  if (data.size() != UINT32_MAX && offset < data.size()) {
     Log.report(logvisor::Warning, FMT_STRING("write_texture: texture used {} bytes, but given {} bytes"), offset,
                data.size());
   }

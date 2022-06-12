@@ -28,8 +28,9 @@ else ()
     list(APPEND PLAT_SRCS CMemoryCardSysNix.cpp)
 endif ()
 
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
 add_custom_command(OUTPUT TCastTo.hpp TCastTo.cpp DEPENDS MkCastTo.py
-        COMMAND python ARGS ${CMAKE_CURRENT_SOURCE_DIR}/MkCastTo.py
+        COMMAND ${Python3_EXECUTABLE} ARGS ${CMAKE_CURRENT_SOURCE_DIR}/MkCastTo.py
         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
         COMMENT "Generating cast functions")
 
@@ -89,6 +90,7 @@ set(RUNTIME_SOURCES_B
         Streams/ContainerReaders.hpp
         Streams/CTextInStream.hpp Streams/CTextInStream.cpp
         Streams/CTextOutStream.hpp Streams/CTextOutStream.cpp
+        Streams/CFileOutStream.hpp Streams/CFileOutStream.cpp
         CGameAllocator.hpp CGameAllocator.cpp
         CMemoryCardSys.hpp CMemoryCardSys.cpp
         CScannableObjectInfo.hpp CScannableObjectInfo.cpp
@@ -147,9 +149,15 @@ function(add_runtime_common_library name)
 endfunction()
 
 set(RUNTIME_INCLUDES ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR} ${CMAKE_SOURCE_DIR})
-set(RUNTIME_LIBRARIES amuse zeus nod NESEmulator libjpeg-turbo jbus kabufuda discord-rpc logvisor OptickCore imgui aurora SDL2-static
+set(DISCORD_RPC_LIBRARY "")
+if (NOT GEKKO AND NOT NX AND NOT IOS AND NOT TVOS)
+    set(DISCORD_RPC_LIBRARY "discord-rpc")
+endif()
+set(RUNTIME_LIBRARIES amuse zeus nod NESEmulator libjpeg-turbo jbus kabufuda logvisor OptickCore imgui aurora
     boo # TODO move audiodev
+    ${DISCORD_RPC_LIBRARY}
     ${ZLIB_LIBRARIES}
+    SDL2::SDL2-static SDL2::SDL2main
     )
 
 add_runtime_common_library(RuntimeCommon ${RUNTIME_SOURCES_A})
@@ -227,6 +235,44 @@ if (TARGET nativefiledialog)
 endif()
 target_compile_definitions(metaforce PUBLIC "-DMETAFORCE_TARGET_BYTE_ORDER=__BYTE_ORDER__")
 
+if (APPLE)
+    if (TVOS)
+        set(RESOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/platforms/tvos)
+        set(INFO_PLIST ${RESOURCE_DIR}/Info.plist.in)
+        file(GLOB_RECURSE RESOURCE_FILES "${RESOURCE_DIR}/Base.lproj/*")
+        list(APPEND RESOURCE_FILES ${RESOURCE_DIR}/Assets.car)
+    elseif (IOS)
+        set(RESOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/platforms/ios)
+        set(INFO_PLIST ${RESOURCE_DIR}/Info.plist.in)
+        message("Using INFO_PLIST ${INFO_PLIST}")
+        file(GLOB_RECURSE RESOURCE_FILES "${RESOURCE_DIR}/Base.lproj/*")
+        list(APPEND RESOURCE_FILES
+            ${RESOURCE_DIR}/Assets.car
+            ${RESOURCE_DIR}/AppIcon60x60@2x.png
+            ${RESOURCE_DIR}/AppIcon76x76@2x~ipad.png)
+    else ()
+        set(RESOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/platforms/macos)
+        set(INFO_PLIST ${RESOURCE_DIR}/Info.plist.in)
+        set(RESOURCE_FILES ${RESOURCE_DIR}/mainicon.icns)
+    endif ()
+    target_sources(metaforce PRIVATE ${INFO_PLIST} ${RESOURCE_FILES})
+    # Add to resources, preserving directory structure
+    foreach (FILE ${RESOURCE_FILES})
+        file(RELATIVE_PATH NEW_FILE "${RESOURCE_DIR}" ${FILE})
+        get_filename_component(NEW_FILE_PATH ${NEW_FILE} DIRECTORY)
+        set_property(SOURCE ${FILE} PROPERTY MACOSX_PACKAGE_LOCATION "Resources/${NEW_FILE_PATH}")
+        source_group("Resources/${NEW_FILE_PATH}" FILES "${FILE}")
+    endforeach ()
+    set_target_properties(
+        metaforce PROPERTIES
+        MACOSX_BUNDLE TRUE
+        MACOSX_BUNDLE_INFO_PLIST ${INFO_PLIST}
+        MACOSX_BUNDLE_BUNDLE_NAME Metaforce
+        MACOSX_BUNDLE_GUI_IDENTIFIER dev.test.metaforce
+        MACOSX_BUNDLE_BUNDLE_VERSION "${METAFORCE_VERSION_STRING}"
+        MACOSX_BUNDLE_SHORT_VERSION_STRING "${METAFORCE_SHORT_VERSION_STRING}"
+    )
+endif ()
 if (WINDOWS_STORE)
     set_property(TARGET metaforce PROPERTY VS_WINRT_COMPONENT TRUE)
     # This should match the Package.appxmanifest

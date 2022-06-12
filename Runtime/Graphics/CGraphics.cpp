@@ -1,7 +1,6 @@
 #include "Runtime/Graphics/CGraphics.hpp"
 
 #include "Runtime/CTimeProvider.hpp"
-#include "Runtime/Graphics/CLight.hpp"
 #include "Runtime/Graphics/CLineRenderer.hpp"
 #include "Runtime/Graphics/CTexture.hpp"
 #include "Runtime/Graphics/Shaders/CTextSupportShader.hpp"
@@ -19,6 +18,8 @@ u32 CGraphics::g_FlippingState;
 bool CGraphics::g_LastFrameUsedAbove = false;
 bool CGraphics::g_InterruptLastFrameUsedAbove = false;
 GX::LightMask CGraphics::g_LightActive{};
+std::array<GX::LightObj, GX::MaxLights> CGraphics::g_LightObjs;
+std::array<ELightType, GX::MaxLights> CGraphics::g_LightTypes;
 zeus::CTransform CGraphics::g_GXModelView;
 zeus::CTransform CGraphics::g_GXModelViewInvXpose;
 zeus::CTransform CGraphics::g_GXModelMatrix = zeus::CTransform();
@@ -80,29 +81,42 @@ void CGraphics::DisableAllLights() {
 
 void CGraphics::LoadLight(ERglLight light, const CLight& info) {
   const auto lightId = static_cast<GX::LightID>(1 << light);
-  switch (info.GetType()) {
-  case ELightType::LocalAmbient:
-    aurora::gfx::load_light_ambient(lightId, info.GetColor());
-    break;
-  case ELightType::Point:
-  case ELightType::Spot:
-  case ELightType::Custom:
-  case ELightType::Directional: {
-    aurora::gfx::Light lightOut{
-        .pos = CGraphics::g_CameraMatrix * info.GetPosition(),
-        .dir = (CGraphics::g_CameraMatrix.basis * info.GetDirection()).normalized(),
-        .color = info.GetColor(),
-        .linAtt = {info.GetAttenuationConstant(), info.GetAttenuationLinear(), info.GetAttenuationQuadratic()},
-        .angAtt = {info.GetAngleAttenuationConstant(), info.GetAngleAttenuationLinear(),
-                   info.GetAngleAttenuationQuadratic()},
-    };
-    if (info.GetType() == ELightType::Directional) {
-      lightOut.pos = (-lightOut.dir) * 1048576.f;
-    }
-    aurora::gfx::load_light(lightId, lightOut);
-    break;
+
+  auto& obj = g_LightObjs[light];
+  zeus::CVector3f pos = info.GetPosition();
+  zeus::CVector3f dir = info.GetDirection();
+  const auto type = info.GetType();
+  if (type == ELightType::Directional) {
+    dir = -(g_CameraMatrix.buildMatrix3f() * dir);
+    GXInitLightPos(&obj, dir.x() * 1048576.f, dir.y() * 1048576.f, dir.z() * 1048576.f);
+    GXInitLightAttn(&obj, 1.f, 0.f, 0.f, 1.f, 0.f, 0.f);
+  } else if (type == ELightType::Spot) {
+    pos = g_CameraMatrix * pos;
+    GXInitLightPos(&obj, pos.x(), pos.y(), pos.z());
+    dir = g_CameraMatrix.buildMatrix3f() * dir;
+    GXInitLightDir(&obj, dir.x(), dir.y(), dir.z());
+    GXInitLightAttn(&obj, 1.f, 0.f, 0.f, info.GetAttenuationConstant(), info.GetAttenuationLinear(),
+                    info.GetAttenuationQuadratic());
+    GXInitLightSpot(&obj, info.GetSpotCutoff(), GX::SP_COS2);
+  } else if (type == ELightType::Custom) {
+    pos = g_CameraMatrix * pos;
+    GXInitLightPos(&obj, pos.x(), pos.y(), pos.z());
+    dir = g_CameraMatrix.buildMatrix3f() * dir;
+    GXInitLightDir(&obj, dir.x(), dir.y(), dir.z());
+    GXInitLightAttn(&obj, info.GetAngleAttenuationConstant(), info.GetAngleAttenuationLinear(),
+                    info.GetAngleAttenuationQuadratic(), info.GetAttenuationConstant(), info.GetAttenuationLinear(),
+                    info.GetAttenuationQuadratic());
+  } else if (type == ELightType::LocalAmbient || type == ELightType::Point) {
+    pos = g_CameraMatrix * pos;
+    GXInitLightPos(&obj, pos.x(), pos.y(), pos.z());
+    GXInitLightAttn(&obj, 1.f, 0.f, 0.f, info.GetAttenuationConstant(), info.GetAttenuationLinear(),
+                    info.GetAttenuationQuadratic());
   }
-  }
+
+  g_LightTypes[light] = type;
+  GX::Color col(info.GetColor().r(), info.GetColor().g(), info.GetColor().b());
+  GXInitLightColor(&obj, col);
+  GXLoadLightObjImm(&obj, lightId);
 }
 
 void CGraphics::EnableLight(ERglLight light) {
@@ -164,12 +178,6 @@ void CGraphics::EndScene() {
    * so simulate field-flipping with XOR instead */
   g_InterruptLastFrameUsedAbove ^= 1;
   g_LastFrameUsedAbove = g_InterruptLastFrameUsedAbove;
-
-  /* Flush text instance buffers just before GPU command list submission */
-  CTextSupportShader::UpdateBuffers();
-
-  /* Same with line renderer */
-  //  CLineRenderer::UpdateBuffers();
 
   ++g_FrameCounter;
 
@@ -674,7 +682,7 @@ void CGraphics::Startup() {
 }
 
 void CGraphics::InitGraphicsVariables() {
-  // g_lightTypes[0..n] = Directional;
+  g_LightTypes.fill(ELightType::Directional);
   g_LightActive = {};
   SetDepthWriteMode(false, g_depthFunc, false);
   SetCullMode(ERglCullMode::None);
@@ -682,8 +690,8 @@ void CGraphics::InitGraphicsVariables() {
   g_IsGXModelMatrixIdentity = false;
   // SetIdentityViewPointMatrix();
   // SetIdentityModelMatrix();
-  // SetViewport(...);
-  // SetPerspective(...);
+  SetViewport(0, 0, g_Viewport.x8_width, g_Viewport.xc_height);
+  SetPerspective(60.f, g_Viewport.x8_width / g_Viewport.xc_height, g_Proj.x14_near, g_Proj.x18_far);
   SetCopyClear(g_ClearColor, 1.f);
   CGX::SetChanMatColor(CGX::EChannelId::Channel0, zeus::skWhite);
   // g_RenderState.ResetFlushAll();
@@ -707,22 +715,26 @@ void CGraphics::SetDefaultVtxAttrFmt() {
   // Unneeded, all attributes are expected to be full floats
   // Left here for reference
 
-  // GXSetVtxAttrFmt(GX::VTXFMT0, GX::VA_POS, GX::POS_XYZ, GX::F32, 0);
-  // GXSetVtxAttrFmt(GX::VTXFMT1, GX::VA_POS, GX::POS_XYZ, GX::F32, 0);
-  // GXSetVtxAttrFmt(GX::VTXFMT2, GX::VA_POS, GX::POS_XYZ, GX::F32, 0);
-  // GXSetVtxAttrFmt(GX::VTXFMT0, GX::VA_NRM, GX::NRM_XYZ, GX::F32, 0);
-  // GXSetVtxAttrFmt(GX::VTXFMT1, GX::VA_NRM, GX::NRM_XYZ, GX::S16, 14);
-  // GXSetVtxAttrFmt(GX::VTXFMT2, GX::VA_NRM, GX::NRM_XYZ, GX::S16, 14);
-  // GXSetVtxAttrFmt(GX::VTXFMT0, GX::VA_CLR0, GX::CLR_RGBA, GX::RGBA8, 0);
-  // GXSetVtxAttrFmt(GX::VTXFMT1, GX::VA_CLR0, GX::CLR_RGBA, GX::RGBA8, 0);
-  // GXSetVtxAttrFmt(GX::VTXFMT2, GX::VA_CLR0, GX::CLR_RGBA, GX::RGBA8, 0);
-  // GXSetVtxAttrFmt(GX::VTXFMT0, GX::VA_TEX0, GX::TEX_ST, GX::F32, 0);
-  // GXSetVtxAttrFmt(GX::VTXFMT1, GX::VA_TEX0, GX::TEX_ST, GX::F32, 0);
-  // GXSetVtxAttrFmt(GX::VTXFMT2, GX::VA_TEX0, GX::TEX_ST, GX::U16, 15);
-  // for (GX::Attr attr = GX::VA_TEX1; attr <= GX::VA_TEX7; attr = GX::Attr(attr + 1)) {
-  //   GXSetVtxAttrFmt(GX::VTXFMT0, attr, GX::TEX_ST, GX::F32, 0);
-  //   GXSetVtxAttrFmt(GX::VTXFMT1, attr, GX::TEX_ST, GX::F32, 0);
-  //   GXSetVtxAttrFmt(GX::VTXFMT2, attr, GX::TEX_ST, GX::F32, 0);
-  // }
+  GXSetVtxAttrFmt(GX::VTXFMT0, GX::VA_POS, GX::POS_XYZ, GX::F32, 0);
+  GXSetVtxAttrFmt(GX::VTXFMT1, GX::VA_POS, GX::POS_XYZ, GX::F32, 0);
+  GXSetVtxAttrFmt(GX::VTXFMT2, GX::VA_POS, GX::POS_XYZ, GX::F32, 0);
+  GXSetVtxAttrFmt(GX::VTXFMT0, GX::VA_NRM, GX::NRM_XYZ, GX::F32, 0);
+  GXSetVtxAttrFmt(GX::VTXFMT1, GX::VA_NRM, GX::NRM_XYZ, GX::S16, 14);
+  GXSetVtxAttrFmt(GX::VTXFMT2, GX::VA_NRM, GX::NRM_XYZ, GX::S16, 14);
+  GXSetVtxAttrFmt(GX::VTXFMT0, GX::VA_CLR0, GX::CLR_RGBA, GX::RGBA8, 0);
+  GXSetVtxAttrFmt(GX::VTXFMT1, GX::VA_CLR0, GX::CLR_RGBA, GX::RGBA8, 0);
+  GXSetVtxAttrFmt(GX::VTXFMT2, GX::VA_CLR0, GX::CLR_RGBA, GX::RGBA8, 0);
+  GXSetVtxAttrFmt(GX::VTXFMT0, GX::VA_TEX0, GX::TEX_ST, GX::F32, 0);
+  GXSetVtxAttrFmt(GX::VTXFMT1, GX::VA_TEX0, GX::TEX_ST, GX::F32, 0);
+  GXSetVtxAttrFmt(GX::VTXFMT2, GX::VA_TEX0, GX::TEX_ST, GX::U16, 15);
+  for (GX::Attr attr = GX::VA_TEX1; attr <= GX::VA_TEX7; attr = GX::Attr(attr + 1)) {
+    GXSetVtxAttrFmt(GX::VTXFMT0, attr, GX::TEX_ST, GX::F32, 0);
+    GXSetVtxAttrFmt(GX::VTXFMT1, attr, GX::TEX_ST, GX::F32, 0);
+    GXSetVtxAttrFmt(GX::VTXFMT2, attr, GX::TEX_ST, GX::F32, 0);
+  }
+}
+
+void CGraphics::ResetGfxStates() noexcept {
+  // sRenderState.x0_ = 0;
 }
 } // namespace metaforce

@@ -10,9 +10,6 @@
 #include "Runtime/Camera/CCameraFilter.hpp"
 #include "Runtime/Character/CModelData.hpp"
 #include "Runtime/Graphics/CLight.hpp"
-#include "Runtime/Graphics/Shaders/CCameraBlurFilter.hpp"
-#include "Runtime/Graphics/Shaders/CColoredQuadFilter.hpp"
-#include "Runtime/Graphics/Shaders/CTexturedQuadFilter.hpp"
 #include "Runtime/GuiSys/CGuiTextSupport.hpp"
 #include "Runtime/GuiSys/CStringTable.hpp"
 
@@ -75,13 +72,6 @@ private:
   bool x44_26_goingUp : 1 = false;
   bool x44_27_fadeWhite : 1 = false;
   bool x44_28_textDirty : 1 = false;
-
-  CColoredQuadFilter m_fadeToBlack{EFilterType::Blend};
-//  CTexturedQuadFilter m_dissolve{EFilterType::Blend, CGraphics::g_SpareTexture.get()};
-  CWideScreenFilter m_widescreen{EFilterType::Blend};
-  CCameraBlurFilter m_camblur;
-
-//  std::array<boo::ObjToken<boo::ITextureCubeR>, 2> m_reflectionCube;
 
   static int GetSuitCharIdx();
   void DrawFirstPass(CActorLights* lights);

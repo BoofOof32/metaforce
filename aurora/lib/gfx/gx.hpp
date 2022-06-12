@@ -3,19 +3,22 @@
 #include "common.hpp"
 
 #include <type_traits>
+#include <utility>
 #include <variant>
 
 namespace aurora::gfx::gx {
 constexpr u32 MaxTextures = GX::MAX_TEXMAP;
 constexpr u32 MaxTevStages = GX::MAX_TEVSTAGE;
 constexpr u32 MaxColorChannels = 2; // COLOR0A0, COLOR1A1
-constexpr u32 MaxTevRegs = 3;       // TEVREG0-2
+constexpr u32 MaxTevRegs = 4;       // TEVPREV, TEVREG0-2
 constexpr u32 MaxKColors = GX::MAX_KCOLOR;
 constexpr u32 MaxTexMtx = 10;
 constexpr u32 MaxPTTexMtx = 20;
 constexpr u32 MaxTexCoord = GX::MAX_TEXCOORD;
 constexpr u32 MaxVtxAttr = GX::VA_MAX_ATTR;
 constexpr u32 MaxTevSwap = GX::MAX_TEVSWAP;
+constexpr u32 MaxIndStages = GX::MAX_INDTEXSTAGE;
+constexpr u32 MaxIndTexMtxs = 3;
 
 template <typename Arg, Arg Default>
 struct TevPass {
@@ -51,25 +54,42 @@ struct TevStage {
   GX::ChannelID channelId = GX::COLOR_NULL;
   GX::TevSwapSel tevSwapRas = GX::TEV_SWAP0;
   GX::TevSwapSel tevSwapTex = GX::TEV_SWAP0;
+  GX::IndTexStageID indTexStage = GX::INDTEXSTAGE0;
+  GX::IndTexFormat indTexFormat = GX::ITF_8;
+  GX::IndTexBiasSel indTexBiasSel = GX::ITB_NONE;
+  GX::IndTexAlphaSel indTexAlphaSel = GX::ITBA_OFF;
+  GX::IndTexMtxID indTexMtxId = GX::ITM_OFF;
+  GX::IndTexWrap indTexWrapS = GX::ITW_OFF;
+  GX::IndTexWrap indTexWrapT = GX::ITW_OFF;
+  bool indTexUseOrigLOD = false;
+  bool indTexAddPrev = false;
+  u8 _p1 = 0;
+  u8 _p2 = 0;
   bool operator==(const TevStage&) const = default;
 };
 static_assert(std::has_unique_object_representations_v<TevStage>);
+struct IndStage {
+  GX::TexCoordID texCoordId;
+  GX::TexMapID texMapId;
+  GX::IndTexScale scaleS;
+  GX::IndTexScale scaleT;
+};
+static_assert(std::has_unique_object_representations_v<IndStage>);
 struct TextureBind {
-  aurora::gfx::TextureHandle handle;
-  metaforce::EClampMode clampMode;
-  float lod;
+  GXTexObj texObj;
 
   TextureBind() noexcept = default;
-  TextureBind(aurora::gfx::TextureHandle handle, metaforce::EClampMode clampMode, float lod) noexcept
-  : handle(std::move(handle)), clampMode(clampMode), lod(lod) {}
-  void reset() noexcept { handle.reset(); };
+  TextureBind(GXTexObj obj) noexcept : texObj(std::move(obj)) {}
+  void reset() noexcept { texObj.ref.reset(); };
   [[nodiscard]] wgpu::SamplerDescriptor get_descriptor() const noexcept;
-  operator bool() const noexcept { return handle; }
+  operator bool() const noexcept { return texObj.ref.operator bool(); }
 };
 // For shader generation
 struct ColorChannelConfig {
   GX::ColorSrc matSrc = GX::SRC_REG;
   GX::ColorSrc ambSrc = GX::SRC_REG;
+  GX::DiffuseFn diffFn = GX::DF_NONE;
+  GX::AttnFn attnFn = GX::AF_NONE;
   bool lightingEnabled = false;
   u8 _p1 = 0;
   u8 _p2 = 0;
@@ -122,9 +142,13 @@ struct AlphaCompare {
   GX::Compare comp1 = GX::ALWAYS;
   u32 ref1;
   bool operator==(const AlphaCompare& other) const = default;
-  operator bool() const { return *this != AlphaCompare{}; }
+  operator bool() const { return comp0 != GX::ALWAYS || comp1 != GX::ALWAYS; }
 };
 static_assert(std::has_unique_object_representations_v<AlphaCompare>);
+struct IndTexMtxInfo {
+  aurora::Mat3x2<float> mtx;
+  s8 scaleExp;
+};
 
 struct GXState {
   zeus::CMatrix4f mv;
@@ -144,9 +168,10 @@ struct GXState {
   std::array<zeus::CColor, GX::MAX_KCOLOR> kcolors;
   std::array<ColorChannelConfig, MaxColorChannels> colorChannelConfig;
   std::array<ColorChannelState, MaxColorChannels> colorChannelState;
-  std::array<LightVariant, GX::MaxLights> lights;
+  std::array<Light, GX::MaxLights> lights;
   std::array<TevStage, MaxTevStages> tevStages;
   std::array<TextureBind, MaxTextures> textures;
+  std::array<GXTlutObj, MaxTextures> tluts;
   std::array<TexMtxVariant, MaxTexMtx> texMtxs;
   std::array<Mat4x4<float>, MaxPTTexMtx> ptTexMtxs;
   std::array<TcgConfig, MaxTexCoord> tcgs;
@@ -157,8 +182,11 @@ struct GXState {
       TevSwap{GX::CH_GREEN, GX::CH_GREEN, GX::CH_GREEN, GX::CH_ALPHA},
       TevSwap{GX::CH_BLUE, GX::CH_BLUE, GX::CH_BLUE, GX::CH_ALPHA},
   };
+  std::array<IndStage, MaxIndStages> indStages;
+  std::array<IndTexMtxInfo, MaxIndTexMtxs> indTexMtxs;
   bool depthCompare = true;
   bool depthUpdate = true;
+  bool colorUpdate = true;
   bool alphaUpdate = true;
   u8 numChans = 0;
   u8 numIndStages = 0;
@@ -172,6 +200,53 @@ static inline Mat4x4<float> get_combined_matrix() noexcept { return g_gxState.pr
 void shutdown() noexcept;
 const TextureBind& get_texture(GX::TexMapID id) noexcept;
 
+static inline bool requires_copy_conversion(const GXTexObj& obj) {
+  if (!obj.ref) {
+    return false;
+  }
+  if (obj.ref->isRenderTexture) {
+    return true;
+  }
+  switch (obj.ref->gxFormat) {
+    // case GX::TF_RGB565:
+    // case GX::TF_I4:
+    // case GX::TF_I8:
+  case GX::TF_C4:
+  case GX::TF_C8:
+  case GX::TF_C14X2:
+    return true;
+  default:
+    return false;
+  }
+}
+static inline bool requires_load_conversion(const GXTexObj& obj) {
+  if (!obj.ref) {
+    return false;
+  }
+  switch (obj.fmt) {
+  case GX::TF_I4:
+  case GX::TF_I8:
+  case GX::TF_C4:
+  case GX::TF_C8:
+  case GX::TF_C14X2:
+    return true;
+  default:
+    return false;
+  }
+}
+static inline bool is_palette_format(GX::TextureFormat fmt) {
+  return fmt == GX::TF_C4 || fmt == GX::TF_C8 || fmt == GX::TF_C14X2;
+}
+
+struct TextureConfig {
+  GX::TextureFormat copyFmt = InvalidTextureFormat; // Underlying texture format
+  GX::TextureFormat loadFmt = InvalidTextureFormat; // Texture format being bound
+  bool renderTex = false;                           // Perform conversion / flip UVs
+  u8 _p1 = 0;
+  u8 _p2 = 0;
+  u8 _p3 = 0;
+  bool operator==(const TextureConfig&) const = default;
+};
 struct ShaderConfig {
   GX::FogType fogType;
   std::array<GX::AttrType, MaxVtxAttr> vtxAttrs;
@@ -182,11 +257,12 @@ struct ShaderConfig {
   std::array<TcgConfig, MaxTexCoord> tcgs;
   AlphaCompare alphaCompare;
   u32 indexedAttributeCount = 0;
+  std::array<TextureConfig, MaxTextures> textureConfig;
   bool operator==(const ShaderConfig&) const = default;
 };
 static_assert(std::has_unique_object_representations_v<ShaderConfig>);
 
-constexpr u32 GXPipelineConfigVersion = 1;
+constexpr u32 GXPipelineConfigVersion = 4;
 struct PipelineConfig {
   u32 version = GXPipelineConfigVersion;
   ShaderConfig shaderConfig;
@@ -197,8 +273,7 @@ struct PipelineConfig {
   GX::BlendFactor blendFacSrc, blendFacDst;
   GX::LogicOp blendOp;
   u32 dstAlpha;
-  bool depthCompare, depthUpdate, alphaUpdate;
-  u8 _pad = 0;
+  bool depthCompare, depthUpdate, alphaUpdate, colorUpdate;
 };
 static_assert(std::has_unique_object_representations_v<PipelineConfig>);
 
@@ -214,10 +289,12 @@ struct GXBindGroups {
 };
 // Output info from shader generation
 struct ShaderInfo {
+  std::bitset<MaxTexCoord> sampledTexCoords;
   std::bitset<MaxTextures> sampledTextures;
   std::bitset<MaxKColors> sampledKColors;
   std::bitset<MaxColorChannels> sampledColorChannels;
-  std::bitset<MaxTevRegs> usesTevReg;
+  std::bitset<MaxTevRegs> loadsTevReg;
+  std::bitset<MaxTevRegs> writesTevReg;
   std::bitset<MaxTexMtx> usesTexMtx;
   std::bitset<MaxPTTexMtx> usesPTTexMtx;
   std::array<GX::TexGenType, MaxTexMtx> texMtxTypes;

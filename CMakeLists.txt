@@ -50,7 +50,7 @@ endif ()
 
 if (METAFORCE_WC_DESCRIBE)
   string(REGEX REPLACE "v([0-9]+)\.([0-9]+)\.([0-9]+)\-([0-9]+).*" "\\1.\\2.\\3.\\4" METAFORCE_VERSION_STRING "${METAFORCE_WC_DESCRIBE}")
-  string(REGEX REPLACE "v([0-9]+)\.([0-9]+)\.([0-9]+).*" "\\1.\\2.\\3" METAFORCE_VERSION_STRING "${METAFORCE_VERSION_STRING}")
+  string(REGEX REPLACE "v([0-9]+)\.([0-9]+)\.([0-9]+).*" "\\1.\\2.\\3" METAFORCE_SHORT_VERSION_STRING "${METAFORCE_WC_DESCRIBE}")
 else ()
   set(METAFORCE_WC_DESCRIBE "UNKNOWN-VERSION")
   set(METAFORCE_VERSION_STRING "0.0.0")
@@ -68,19 +68,29 @@ if(APPLE)
   set(EXTRA_LANGUAGES OBJC)
 endif()
 project(metaforce LANGUAGES C CXX ASM ${EXTRA_LANGUAGES} VERSION ${METAFORCE_VERSION_STRING})
+if (APPLE AND NOT TVOS AND CMAKE_SYSTEM_NAME STREQUAL tvOS)
+  # ios.toolchain.cmake hack for SDL
+  set(TVOS ON)
+  set(IOS OFF)
+endif ()
 
 string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" ATHENA_ARCH)
 string(TOLOWER "${CMAKE_HOST_SYSTEM_PROCESSOR}" ATHENA_HOST_ARCH)
+string(TOLOWER "${CMAKE_HOST_SYSTEM_NAME}" HOST_PLATFORM_NAME)
+string(TOLOWER "${CMAKE_SYSTEM_NAME}" PLATFORM_NAME)
 set(ATHENA_EXTENSION "tar.gz")
-if (CMAKE_SYSTEM_NAME STREQUAL Darwin)
-  set(PLATFORM_NAME macos)
+if (CMAKE_HOST_SYSTEM_NAME STREQUAL Darwin)
+  set(HOST_PLATFORM_NAME macos)
   set(ATHENA_ARCH universal)
   set(ATHENA_HOST_ARCH universal)
+elseif (CMAKE_HOST_SYSTEM_NAME STREQUAL Windows)
+  set(HOST_PLATFORM_NAME win32)
+  set(ATHENA_EXTENSION ".7z")
+endif ()
+if (CMAKE_SYSTEM_NAME STREQUAL Darwin)
+  set(PLATFORM_NAME macos)
 elseif (CMAKE_SYSTEM_NAME STREQUAL Windows)
   set(PLATFORM_NAME win32)
-  set(ATHENA_EXTENSION ".7z")
-elseif (CMAKE_SYSTEM_NAME STREQUAL "Linux")
-  set(PLATFORM_NAME linux)
 endif ()
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Binaries)
@@ -231,15 +241,20 @@ else()
     add_compile_options(-fno-asynchronous-unwind-tables)
   endif()
 
-  if(METAFORCE_MSAN)
+  if (METAFORCE_ASAN)
+    add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-stdlib=libc++> -fsanitize=address
+        -fsanitize-address-use-after-scope)
+    add_link_options($<$<COMPILE_LANGUAGE:CXX>:-stdlib=libc++> -fsanitize=address
+        -fsanitize-address-use-after-scope)
+  elseif(METAFORCE_MSAN)
     add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-stdlib=libc++> -fsanitize=memory
                         -fsanitize-memory-track-origins -fsanitize-recover=all)
   endif()
   add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-fno-rtti>
                       $<$<COMPILE_LANGUAGE:CXX>:-fno-exceptions>
-                      -Wall -Wno-multichar -Werror=implicit-fallthrough
+                      -Wall -Wno-multichar
                       -Wno-unused-variable -Wno-unused-result -Wno-unused-but-set-variable
-                      -Wno-unused-function -Wno-sign-compare -Wno-unknown-pragmas -Werror)
+                      -Wno-unused-function -Wno-sign-compare -Wno-unknown-pragmas)
   # doesn't work with generator expression in add_compile_options?
   if ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "Clang" OR "${CMAKE_CXX_COMPILER_ID}" STREQUAL "AppleClang")
     add_compile_options(-Wno-unknown-warning-option -Wno-unused-private-field)
@@ -250,10 +265,6 @@ else()
   if(APPLE)
     add_compile_options(-Wno-error=deprecated-declarations
                         $<$<CONFIG:Release>:-flto=thin>)
-    if (METAFORCE_ASAN)
-      add_compile_options(-fsanitize=address -fsanitize-address-use-after-scope)
-      add_link_options(-fsanitize=address -fsanitize-address-use-after-scope)
-    endif ()
   endif()
 
 endif()
