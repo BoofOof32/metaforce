@@ -221,6 +221,7 @@ public:
     if (!m_projectInitialized && !m_deferredProject.empty()) {
       if (CDvdFile::Initialize(m_deferredProject)) {
         m_projectInitialized = true;
+        m_cvarCommons.m_lastDiscPath->fromLiteral(m_deferredProject);
       } else {
         Log.report(logvisor::Error, FMT_STRING("Failed to open disc image '{}'"), m_deferredProject);
         m_imGuiConsole.m_errorString = fmt::format(FMT_STRING("Failed to open disc image '{}'"), m_deferredProject);
@@ -272,6 +273,7 @@ public:
         g_mainMP1.reset();
         CDvdFile::Shutdown();
         m_projectInitialized = false;
+        m_cvarCommons.m_lastDiscPath->fromLiteral(""sv);
       }
     }
 
@@ -496,11 +498,6 @@ public:
 } // namespace metaforce
 
 static void SetupBasics() {
-#if _WIN32
-  if (logging && GetFileType(GetStdHandle(STD_ERROR_HANDLE)) == FILE_TYPE_UNKNOWN)
-    logvisor::CreateWin32Console();
-#endif
-
   auto result = zeus::validateCPU();
   if (!result.first) {
 #if _WIN32 && !WINDOWS_STORE
@@ -516,8 +513,7 @@ static void SetupBasics() {
   }
 
 #if SENTRY_ENABLED
-  FileStoreManager fileMgr{"sentry-native-metaforce"};
-  std::string cacheDir{fileMgr.getStoreRoot()};
+  std::string cacheDir{metaforce::FileStoreManager::instance()->getStoreRoot()};
   logvisor::RegisterSentry("metaforce", METAFORCE_WC_DESCRIBE, cacheDir.c_str());
 #endif
 }
@@ -531,6 +527,10 @@ static bool IsClientLoggingEnabled(int argc, char** argv) {
   return false;
 }
 
+static void SetupLogging() {
+
+}
+
 #if !WINDOWS_STORE
 int main(int argc, char** argv) {
   // TODO: This seems to fix a lot of weird issues with rounding
@@ -542,29 +542,38 @@ int main(int argc, char** argv) {
     return 100;
   }
 
-  SetupBasics();
   metaforce::FileStoreManager fileMgr{"AxioDL", "metaforce"};
+  SetupBasics();
 
   std::vector<std::string> args;
   for (int i = 1; i < argc; ++i) {
     args.emplace_back(argv[i]);
   }
 
+  // FIXME: logvisor needs to copy this
+  std::string logFilePath;
+
   bool restart = false;
   do {
     metaforce::CVarManager cvarMgr{fileMgr};
     metaforce::CVarCommons cvarCmns{cvarMgr};
+
     if (!restart) {
       cvarMgr.parseCommandLine(args);
 
       // TODO add clear loggers func to logvisor so we can recreate loggers on restart
+      bool logging = IsClientLoggingEnabled(argc, argv);
+#if _WIN32
+      if (logging && GetFileType(GetStdHandle(STD_ERROR_HANDLE)) == FILE_TYPE_UNKNOWN) {
+        logvisor::CreateWin32Console();
+      }
+#endif
       logvisor::RegisterStandardExceptions();
-      if (IsClientLoggingEnabled(argc, argv)) {
+      if (logging) {
         logvisor::RegisterConsoleLogger();
       }
 
       std::string logFile = cvarCmns.getLogFile();
-      std::string logFilePath;
       if (!logFile.empty()) {
         std::time_t time = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
         char buf[100];
@@ -573,6 +582,7 @@ int main(int argc, char** argv) {
         logvisor::RegisterFileLogger(logFilePath.c_str());
       }
     }
+
     auto app = std::make_unique<metaforce::Application>(fileMgr, cvarMgr, cvarCmns);
     auto icon = metaforce::GetIcon();
     auto data = aurora::Icon{
