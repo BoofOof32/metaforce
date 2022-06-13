@@ -17,22 +17,19 @@ Builds available at [https://releases.axiodl.com](https://releases.axiodl.com).
 * Linux (Vulkan)
     * Follow [this guide](https://github.com/lutris/docs/blob/master/InstallingDrivers.md) to set up Vulkan & appropriate drivers for your distro.
 
-### Usage (GUI)
+### Usage
 
-Windows:
-- Open `metaforce.exe`
+Windows/MacOS/Linux:
+- Open `metaforce`
+- Click `Select Game Disc` and select your iso of MP1
+##### (Note for Linux)
+ - Ensure AppImage is marked as executable: `chmod +x Metaforce-*.AppImage`
 
-macOS:
-- Open `Metaforce.app`
+### CLI usage
+Alternatively, you can run Metaforce from CLI and give it the iso there, skipping the initial menu
+* Run Metaforce: `metaforce mp1.iso`
 
-Linux: 
-- Ensure AppImage is marked as executable: `chmod +x Metaforce-*.AppImage`
-- Open `Metaforce-*.AppImage`
-
-### CLI usage (GC versions)
-* Run Metaforce: `metaforce mp1.iso `
-
-### CLI usage (Wii versions)
+### For Wii versions
 
 **IMPORTANT**: Trilogy main menu currently doesn't work, and requires the `--warp 1 0` command line arguments to get in-game.  
 
